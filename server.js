@@ -98,6 +98,10 @@ function redirect(res, location) {
   res.end();
 }
 
+function loginPathForRole(role) {
+  return role === "admin" ? "/admin/login" : role === "store" ? "/store/login" : "/member/login";
+}
+
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", ...headers });
   res.end(body);
@@ -106,6 +110,14 @@ function send(res, status, body, headers = {}) {
 function sendText(res, status, body, headers = {}) {
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...headers });
   res.end(body);
+}
+
+function isUniqueConstraintError(error) {
+  return String(error?.message || "").includes("UNIQUE constraint failed");
+}
+
+function duplicateEmailMessage() {
+  return "此 Email 已被使用，請更換 Email。";
 }
 
 function readBody(req) {
@@ -181,6 +193,7 @@ function nav(user) {
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/deductions", "扣點要求"]]
       : [["/member/dashboard", "會員中心"]];
+  links.push(["/account/password", "修改密碼"]);
   return `<nav>${links.map(([href, label]) => `<a href="${href}">${label}</a>`).join("")}<form method="post" action="/logout"><button>登出</button></form></nav>`;
 }
 
@@ -227,6 +240,18 @@ function loginPage(role, error = "", slug = "") {
   </div>`);
 }
 
+function passwordPage(user, error = "") {
+  return page("修改密碼", `<div class="panel">
+    ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+    <form class="stack" method="post" action="/account/password">
+      <div class="field"><label>目前密碼</label><input name="current_password" type="password" autocomplete="current-password" required autofocus></div>
+      <div class="field"><label>新密碼</label><input name="new_password" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="field"><label>確認新密碼</label><input name="confirm_password" type="password" autocomplete="new-password" minlength="8" required></div>
+      <button class="button">更新密碼並重新登入</button>
+    </form>
+  </div>`, user);
+}
+
 function renderStatsCards(stats) {
   return `<div class="grid cards">
     <div class="card metric">購買點數總計<strong>${money(stats.purchase_points)}</strong></div>
@@ -253,13 +278,13 @@ function adminDashboard(req, res, user) {
   </div>`, user));
 }
 
-function storeForm() {
-  return `<form class="stack" method="post" action="/admin/stores">
-    <div class="field"><label>分店名稱</label><input name="store_name" required></div>
-    <div class="field"><label>聯絡人</label><input name="contact_name" required></div>
-    <div class="field"><label>電話</label><input name="phone" required></div>
-    <div class="field"><label>Email / 登入帳號</label><input name="email" type="email" required></div>
-    <div class="field"><label>初始密碼</label><input name="password" value="password123" required></div>
+function storeForm(error = "", values = {}) {
+  return `${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}<form class="stack" method="post" action="/admin/stores">
+    <div class="field"><label>分店名稱</label><input name="store_name" value="${escapeHtml(values.store_name || "")}" required></div>
+    <div class="field"><label>聯絡人</label><input name="contact_name" value="${escapeHtml(values.contact_name || "")}" required></div>
+    <div class="field"><label>電話</label><input name="phone" value="${escapeHtml(values.phone || "")}" required></div>
+    <div class="field"><label>Email / 登入帳號</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
+    <div class="field"><label>初始密碼</label><input name="password" value="${escapeHtml(values.password || "password123")}" required></div>
     <button class="button">建立分店</button>
   </form>`;
 }
@@ -300,12 +325,12 @@ function renderStoreDashboard(res, user, storeId, adminView = false) {
     </div>`, user));
 }
 
-function memberForm() {
-  return `<form class="stack" method="post" action="/store/members">
-    <div class="field"><label>姓名</label><input name="name" required></div>
-    <div class="field"><label>電話</label><input name="phone" required></div>
-    <div class="field"><label>Email / 會員登入帳號</label><input name="email" type="email" required></div>
-    <div class="field"><label>初始密碼</label><input name="password" value="password123" required></div>
+function memberForm(error = "", values = {}) {
+  return `${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}<form class="stack" method="post" action="/store/members">
+    <div class="field"><label>姓名</label><input name="name" value="${escapeHtml(values.name || "")}" required></div>
+    <div class="field"><label>電話</label><input name="phone" value="${escapeHtml(values.phone || "")}" required></div>
+    <div class="field"><label>Email / 會員登入帳號</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
+    <div class="field"><label>初始密碼</label><input name="password" value="${escapeHtml(values.password || "password123")}" required></div>
     <button class="button">建立會員</button>
   </form>`;
 }
@@ -401,30 +426,69 @@ async function handlePost(req, res, pathname) {
     res.writeHead(302, { "Set-Cookie": "session=; Max-Age=0; Path=/", Location: "/" });
     return res.end();
   }
+  if (pathname === "/account/password") {
+    const sessionUser = requireUser(req, res, ["admin", "store", "member"]); if (!sessionUser) return;
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(sessionUser.id);
+    if (!verifyPassword(body.current_password || "", user.password_hash)) {
+      return send(res, 400, passwordPage(sessionUser, "目前密碼不正確。"));
+    }
+    if ((body.new_password || "") !== (body.confirm_password || "")) {
+      return send(res, 400, passwordPage(sessionUser, "新密碼與確認新密碼不一致。"));
+    }
+    if (String(body.new_password || "").length < 8) {
+      return send(res, 400, passwordPage(sessionUser, "新密碼至少需要 8 個字元。"));
+    }
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.new_password), user.id);
+    res.writeHead(302, {
+      "Set-Cookie": "session=; Max-Age=0; Path=/",
+      Location: `${loginPathForRole(user.role)}?passwordChanged=1`
+    });
+    return res.end();
+  }
   if (pathname === "/admin/stores") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
-    const slug = slugify(body.store_name);
-    const store = db.prepare(`
-      INSERT INTO stores (store_name, contact_name, phone, email, platform_slug)
-      VALUES (?, ?, ?, ?, ?) RETURNING id
-    `).get(body.store_name, body.contact_name, body.phone, body.email, slug);
-    db.prepare(`
-      INSERT INTO users (role, name, phone, email, password_hash, store_id)
-      VALUES ('store', ?, ?, ?, ?, ?)
-    `).run(body.store_name, body.phone, body.email, hashPassword(body.password || "password123"), store.id);
-    return redirect(res, `/admin/stores/${store.id}`);
+    try {
+      const slug = slugify(body.store_name);
+      db.exec("BEGIN");
+      const store = db.prepare(`
+        INSERT INTO stores (store_name, contact_name, phone, email, platform_slug)
+        VALUES (?, ?, ?, ?, ?) RETURNING id
+      `).get(body.store_name, body.contact_name, body.phone, body.email, slug);
+      db.prepare(`
+        INSERT INTO users (role, name, phone, email, password_hash, store_id)
+        VALUES ('store', ?, ?, ?, ?, ?)
+      `).run(body.store_name, body.phone, body.email, hashPassword(body.password || "password123"), store.id);
+      db.exec("COMMIT");
+      return redirect(res, `/admin/stores/${store.id}`);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (isUniqueConstraintError(error)) {
+        return send(res, 400, page("新增分店", storeForm(duplicateEmailMessage(), body), user));
+      }
+      throw error;
+    }
   }
   if (pathname === "/store/members") {
     const user = requireUser(req, res, ["store"]); if (!user) return;
-    const newUser = db.prepare(`
-      INSERT INTO users (role, name, phone, email, password_hash, store_id)
-      VALUES ('member', ?, ?, ?, ?, ?) RETURNING id
-    `).get(body.name, body.phone, body.email, hashPassword(body.password || "password123"), user.store_id);
-    const member = db.prepare(`
-      INSERT INTO members (store_id, user_id, name, phone, email)
-      VALUES (?, ?, ?, ?, ?) RETURNING id
-    `).get(user.store_id, newUser.id, body.name, body.phone, body.email);
-    return redirect(res, `/store/members/${member.id}`);
+    try {
+      db.exec("BEGIN");
+      const newUser = db.prepare(`
+        INSERT INTO users (role, name, phone, email, password_hash, store_id)
+        VALUES ('member', ?, ?, ?, ?, ?) RETURNING id
+      `).get(body.name, body.phone, body.email, hashPassword(body.password || "password123"), user.store_id);
+      const member = db.prepare(`
+        INSERT INTO members (store_id, user_id, name, phone, email)
+        VALUES (?, ?, ?, ?, ?) RETURNING id
+      `).get(user.store_id, newUser.id, body.name, body.phone, body.email);
+      db.exec("COMMIT");
+      return redirect(res, `/store/members/${member.id}`);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (isUniqueConstraintError(error)) {
+        return send(res, 400, page("新增會員", memberForm(duplicateEmailMessage(), body), user));
+      }
+      throw error;
+    }
   }
   const txMatch = pathname.match(/^\/store\/members\/(\d+)\/transactions$/);
   if (txMatch) {
@@ -499,11 +563,18 @@ async function router(req, res) {
     if (req.method === "POST") return handlePost(req, res, pathname);
 
     if (pathname === "/") return redirect(res, "/admin/login");
-    if (pathname === "/admin/login") return send(res, 200, loginPage("admin"));
-    if (pathname === "/store/login") return send(res, 200, loginPage("store"));
-    if (pathname === "/member/login") return send(res, 200, loginPage("member"));
+    const passwordChangedMessage = url.searchParams.get("passwordChanged") ? "密碼已更新，請使用新密碼重新登入。" : "";
+    if (pathname === "/admin/login") return send(res, 200, loginPage("admin", passwordChangedMessage));
+    if (pathname === "/store/login") return send(res, 200, loginPage("store", passwordChangedMessage));
+    if (pathname === "/member/login") return send(res, 200, loginPage("member", passwordChangedMessage));
     const slugLogin = pathname.match(/^\/store\/([^/]+)\/login$/);
     if (slugLogin) return send(res, 200, loginPage("store", "", slugLogin[1]));
+
+    if (pathname === "/account/password") {
+      const user = requireUser(req, res, ["admin", "store", "member"]);
+      if (user) return send(res, 200, passwordPage(user));
+      return;
+    }
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
     if (pathname === "/admin/stores") { const user = requireUser(req, res, ["admin"]); if (user) return adminStores(req, res, user); return; }
@@ -525,6 +596,9 @@ async function router(req, res) {
     send(res, 404, page("找不到頁面", `<div class="empty">找不到這個頁面。</div>`, currentUser(req)));
   } catch (error) {
     console.error(error);
+    if (isUniqueConstraintError(error)) {
+      return send(res, 400, page("資料重複", `<div class="notice">${duplicateEmailMessage()}</div>`, currentUser(req)));
+    }
     send(res, 500, page("系統錯誤", `<div class="empty">${escapeHtml(error.message)}</div>`, currentUser(req)));
   }
 }
