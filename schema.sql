@@ -13,17 +13,24 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK (role IN ('admin', 'store', 'member')),
   name TEXT NOT NULL,
   phone TEXT,
-  email TEXT NOT NULL UNIQUE,
+  email TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   store_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  is_super_admin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (store_id) REFERENCES stores(id)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email ON users(email, role) WHERE role = 'admin';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_email ON users(email, role) WHERE role = 'member';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_email_store ON users(email, role, store_id) WHERE role = 'store';
 
 CREATE TABLE IF NOT EXISTS members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   store_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
+  member_code TEXT UNIQUE,
   name TEXT NOT NULL,
   phone TEXT NOT NULL,
   email TEXT NOT NULL,
@@ -58,4 +65,39 @@ CREATE TABLE IF NOT EXISTS deduction_requests (
   approved_at TEXT,
   FOREIGN KEY (store_id) REFERENCES stores(id),
   FOREIGN KEY (member_id) REFERENCES members(id)
+);
+
+CREATE TABLE IF NOT EXISTS admin_account_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'store')),
+  store_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'disabled')),
+  user_id INTEGER,
+  requested_by INTEGER,
+  reviewed_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at TEXT,
+  disabled_at TEXT,
+  FOREIGN KEY (store_id) REFERENCES stores(id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (requested_by) REFERENCES users(id),
+  FOREIGN KEY (reviewed_by) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL CHECK (event_type IN ('login', 'logout')),
+  login_email TEXT NOT NULL,
+  admin_name TEXT,
+  ip TEXT,
+  user_agent TEXT,
+  result TEXT NOT NULL CHECK (result IN ('success', 'failed')),
+  failure_reason TEXT,
+  user_id INTEGER,
+  event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
 );

@@ -14,6 +14,9 @@ const SCHEMA_PATH = path.join(ROOT, "schema.sql");
 const PUBLIC_DIR = path.join(ROOT, "public");
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-change-me-joy-yanmo";
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
+const SUPER_ADMIN_EMAIL = "luodayu168@gmail.com";
+const SUPER_ADMIN_INITIAL_PASSWORD = "QazxsW12345";
+const DEFAULT_MANAGER_PASSWORD = "password123";
 
 if (process.env.NODE_ENV === "production" && SESSION_SECRET === "dev-change-me-joy-yanmo") {
   throw new Error("Production requires SESSION_SECRET.");
@@ -23,6 +26,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec(fs.readFileSync(SCHEMA_PATH, "utf8"));
+runMigrations();
 
 const zhType = { purchase: "購買點數", gift: "贈予點數", consume: "消費扣點" };
 const zhStatus = { completed: "已完成", pending: "待核准", rejected: "已拒絕", approved: "已核准" };
@@ -43,6 +47,120 @@ function hashPassword(password) {
   const iterations = 120000;
   const hash = crypto.pbkdf2Sync(password, salt, iterations, 32, "sha256").toString("base64url");
   return `pbkdf2$${iterations}$${salt}$${hash}`;
+}
+
+function columnExists(table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
+}
+
+function runMigrations() {
+  const userSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || "";
+  if (userSql.includes("email TEXT NOT NULL UNIQUE")) {
+    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec("BEGIN");
+    try {
+      db.exec(`
+        CREATE TABLE users_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'store', 'member')),
+          name TEXT NOT NULL,
+          phone TEXT,
+          email TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          store_id INTEGER,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+          is_super_admin INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (store_id) REFERENCES stores(id)
+        );
+      `);
+      db.exec(`
+        INSERT INTO users_new (id, role, name, phone, email, password_hash, store_id, status, is_super_admin, created_at)
+        SELECT id, role, name, phone, email, password_hash, store_id, 'active', 0, created_at FROM users;
+      `);
+      db.exec("DROP TABLE users;");
+      db.exec("ALTER TABLE users_new RENAME TO users;");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
+  }
+  if (!columnExists("users", "status")) db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';");
+  if (!columnExists("users", "is_super_admin")) db.exec("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0;");
+  if (!columnExists("members", "member_code")) db.exec("ALTER TABLE members ADD COLUMN member_code TEXT;");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_members_member_code ON members(member_code);");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email ON users(email, role) WHERE role = 'admin';");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_email ON users(email, role) WHERE role = 'member';");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_email_store ON users(email, role, store_id) WHERE role = 'store';");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS admin_account_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      phone TEXT,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'store')),
+      store_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'disabled')),
+      user_id INTEGER,
+      requested_by INTEGER,
+      reviewed_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      reviewed_at TEXT,
+      disabled_at TEXT,
+      FOREIGN KEY (store_id) REFERENCES stores(id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (requested_by) REFERENCES users(id),
+      FOREIGN KEY (reviewed_by) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS admin_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL CHECK (event_type IN ('login', 'logout')),
+      login_email TEXT NOT NULL,
+      admin_name TEXT,
+      ip TEXT,
+      user_agent TEXT,
+      result TEXT NOT NULL CHECK (result IN ('success', 'failed')),
+      failure_reason TEXT,
+      user_id INTEGER,
+      event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+  `);
+  ensureSuperAdmin();
+  backfillMemberCodes();
+}
+
+function ensureSuperAdmin() {
+  const existing = db.prepare("SELECT id FROM users WHERE email = ? AND role = 'admin'").get(SUPER_ADMIN_EMAIL);
+  if (existing) {
+    db.prepare("UPDATE users SET is_super_admin = 1, status = 'active' WHERE id = ?").run(existing.id);
+    return;
+  }
+  db.prepare(`
+    INSERT INTO users (role, name, phone, email, password_hash, status, is_super_admin)
+    VALUES ('admin', '總部專職管理員', '', ?, ?, 'active', 1)
+  `).run(SUPER_ADMIN_EMAIL, hashPassword(SUPER_ADMIN_INITIAL_PASSWORD));
+}
+
+function generateMemberCode() {
+  const ym = new Date().toISOString().slice(0, 7).replace("-", "");
+  const prefix = `YM${ym}`;
+  const last = db.prepare("SELECT member_code FROM members WHERE member_code LIKE ? ORDER BY member_code DESC LIMIT 1").get(`${prefix}%`);
+  const next = last?.member_code ? Number(last.member_code.slice(-5)) + 1 : 1;
+  return `${prefix}${String(next).padStart(5, "0")}`;
+}
+
+function backfillMemberCodes() {
+  const rows = db.prepare("SELECT id FROM members WHERE member_code IS NULL OR member_code = '' ORDER BY id").all();
+  for (const row of rows) {
+    let code = generateMemberCode();
+    while (db.prepare("SELECT id FROM members WHERE member_code = ?").get(code)) code = generateMemberCode();
+    db.prepare("UPDATE members SET member_code = ? WHERE id = ?").run(code, row.id);
+  }
 }
 
 function verifyPassword(password, stored) {
@@ -73,7 +191,9 @@ function parseToken(token) {
   if (sign(payload) !== sig) return null;
   const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   if (!data.exp || data.exp < Date.now()) return null;
-  return db.prepare("SELECT id, role, name, email, phone, store_id FROM users WHERE id = ?").get(data.id) || null;
+  const user = db.prepare("SELECT id, role, name, email, phone, store_id, status, is_super_admin FROM users WHERE id = ?").get(data.id) || null;
+  if (user?.status === "disabled") return null;
+  return user;
 }
 
 function parseCookies(header = "") {
@@ -117,7 +237,22 @@ function isUniqueConstraintError(error) {
 }
 
 function duplicateEmailMessage() {
-  return "此 Email 已被使用，請更換 Email。";
+  return "此 Email 已在相同角色中使用，請更換 Email。";
+}
+
+function clientIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+}
+
+function recordAdminAudit(req, { eventType, email, user = null, result, failureReason = "" }) {
+  db.prepare(`
+    INSERT INTO admin_audit_logs (event_type, login_email, admin_name, ip, user_agent, result, failure_reason, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(eventType, email || user?.email || "", user?.name || "", clientIp(req), req.headers["user-agent"] || "", result, failureReason, user?.id || null);
+}
+
+function isSuperAdmin(user) {
+  return user?.role === "admin" && (user.is_super_admin === 1 || user.email === SUPER_ADMIN_EMAIL);
 }
 
 function readBody(req) {
@@ -189,10 +324,11 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
-      ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/deductions", "扣點要求"]]
+      ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
       : [["/member/dashboard", "會員中心"]];
+  if (isSuperAdmin(user)) links.push(["/admin/audit-logs", "操作紀錄"]);
   links.push(["/account/password", "修改密碼"]);
   return `<nav>${links.map(([href, label]) => `<a href="${href}">${label}</a>`).join("")}<form method="post" action="/logout"><button>登出</button></form></nav>`;
 }
@@ -266,6 +402,225 @@ function renderTransactions(rows) {
   return `<table class="table"><thead><tr><th>時間</th><th>類型</th><th>點數</th><th>狀態</th><th>說明</th></tr></thead><tbody>${rows.map((r) => `
     <tr><td>${escapeHtml(r.created_at)}</td><td>${zhType[r.type]}</td><td>${money(r.points)}</td><td><span class="badge">${zhStatus[r.status]}</span></td><td>${escapeHtml(r.description || "")}</td></tr>
   `).join("")}</tbody></table>`;
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function sendCsv(res, filename, rows) {
+  const headers = rows[0] ? Object.keys(rows[0]) : [];
+  const csv = "\ufeff" + [headers.join(","), ...rows.map((row) => headers.map((h) => csvEscape(row[h])).join(","))].join("\n");
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${filename}"`
+  });
+  res.end(csv);
+}
+
+function crc32(buffer) {
+  let table = crc32.table;
+  if (!table) {
+    table = crc32.table = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+  }
+  let crc = 0xffffffff;
+  for (const byte of buffer) crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUInt16(value) {
+  const b = Buffer.alloc(2); b.writeUInt16LE(value); return b;
+}
+
+function writeUInt32(value) {
+  const b = Buffer.alloc(4); b.writeUInt32LE(value); return b;
+}
+
+function zipStore(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = Buffer.from(file.name);
+    const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data);
+    const crc = crc32(data);
+    const local = Buffer.concat([
+      writeUInt32(0x04034b50), writeUInt16(20), writeUInt16(0), writeUInt16(0), writeUInt16(0), writeUInt16(0),
+      writeUInt32(crc), writeUInt32(data.length), writeUInt32(data.length), writeUInt16(name.length), writeUInt16(0), name, data
+    ]);
+    localParts.push(local);
+    centralParts.push(Buffer.concat([
+      writeUInt32(0x02014b50), writeUInt16(20), writeUInt16(20), writeUInt16(0), writeUInt16(0), writeUInt16(0), writeUInt16(0),
+      writeUInt32(crc), writeUInt32(data.length), writeUInt32(data.length), writeUInt16(name.length), writeUInt16(0), writeUInt16(0),
+      writeUInt16(0), writeUInt16(0), writeUInt32(0), writeUInt32(offset), name
+    ]));
+    offset += local.length;
+  }
+  const central = Buffer.concat(centralParts);
+  const end = Buffer.concat([
+    writeUInt32(0x06054b50), writeUInt16(0), writeUInt16(0), writeUInt16(files.length), writeUInt16(files.length),
+    writeUInt32(central.length), writeUInt32(offset), writeUInt16(0)
+  ]);
+  return Buffer.concat([...localParts, central, end]);
+}
+
+function xlsxEscape(value) {
+  return escapeHtml(value).replace(/\n/g, " ");
+}
+
+function sheetXml(rows) {
+  const headers = rows[0] ? Object.keys(rows[0]) : ["資料"];
+  const allRows = [headers, ...rows.map((row) => headers.map((h) => row[h]))];
+  const colWidths = headers.map((h, i) => Math.min(42, Math.max(12, ...allRows.map((r) => String(r[i] ?? "").length + 2))));
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${colWidths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join("")}</cols><sheetData>${allRows.map((row, rIdx) => `<row r="${rIdx + 1}">${row.map((cell, cIdx) => `<c r="${String.fromCharCode(65 + cIdx)}${rIdx + 1}" t="inlineStr"><is><t>${xlsxEscape(cell ?? "")}</t></is></c>`).join("")}</row>`).join("")}</sheetData></worksheet>`;
+}
+
+function sendXlsx(res, filename, sheets) {
+  const files = [
+    { name: "[Content_Types].xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>` },
+    { name: "_rels/.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${xlsxEscape(s.name).slice(0, 31)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>` },
+    { name: "xl/_rels/workbook.xml.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}</Relationships>` },
+    ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheetXml(s.rows) }))
+  ];
+  const body = zipStore(files);
+  res.writeHead(200, {
+    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Content-Length": body.length
+  });
+  res.end(body);
+}
+
+function storeNameExpr(alias = "s") {
+  return `COALESCE(${alias}.store_name, '')`;
+}
+
+function memberReportRows(storeId = null) {
+  const where = storeId ? "WHERE m.store_id = ?" : "";
+  const params = storeId ? [storeId] : [];
+  return db.prepare(`
+    SELECT m.member_code AS 會員編號, m.name AS 會員姓名, m.phone AS 手機, m.email AS Email,
+      ${storeNameExpr("s")} AS 原註冊分店,
+      COALESCE(SUM(CASE WHEN pt.type='purchase' AND pt.status='completed' THEN pt.points ELSE 0 END),0) AS 購買點數,
+      COALESCE(SUM(CASE WHEN pt.type='gift' AND pt.status='completed' THEN pt.points ELSE 0 END),0) AS 贈予點數,
+      COALESCE(SUM(CASE WHEN pt.type='consume' AND pt.status='completed' THEN pt.points ELSE 0 END),0) AS 已消費點數,
+      COALESCE(SUM(CASE WHEN pt.type IN ('purchase','gift') AND pt.status='completed' THEN pt.points WHEN pt.type='consume' AND pt.status='completed' THEN -pt.points ELSE 0 END),0) AS 剩餘點數,
+      m.created_at AS 建立時間
+    FROM members m
+    JOIN stores s ON s.id = m.store_id
+    LEFT JOIN point_transactions pt ON pt.member_id = m.id
+    ${where}
+    GROUP BY m.id
+    ORDER BY m.id DESC
+  `).all(...params);
+}
+
+function storeReportRows() {
+  return db.prepare(`
+    SELECT s.id AS 分店ID, s.store_name AS 分店名稱, s.contact_name AS 聯絡人, s.phone AS 電話, s.email AS Email,
+      s.platform_slug AS 專屬代碼, COUNT(m.id) AS 會員數, s.created_at AS 建立時間
+    FROM stores s LEFT JOIN members m ON m.store_id = s.id
+    GROUP BY s.id ORDER BY s.id DESC
+  `).all();
+}
+
+function transactionReportRows(storeId = null) {
+  const where = storeId ? "WHERE pt.store_id = ?" : "";
+  const params = storeId ? [storeId] : [];
+  return db.prepare(`
+    SELECT pt.id, pt.created_at AS 交易時間, m.id AS member_id, m.member_code AS 會員編號, m.name AS 會員姓名, m.email AS 會員Email,
+      reg.store_name AS 原註冊分店, spend.store_name AS 消費分店, pt.type AS 交易類型, pt.points AS 點數, pt.description AS 備註
+      ,(
+        SELECT COALESCE(SUM(CASE WHEN prior.type IN ('purchase','gift') THEN prior.points WHEN prior.type='consume' THEN -prior.points ELSE 0 END),0)
+        FROM point_transactions prior
+        WHERE prior.member_id = pt.member_id AND prior.status = 'completed' AND prior.id <= pt.id
+      ) AS 交易後餘額
+    FROM point_transactions pt
+    JOIN members m ON m.id = pt.member_id
+    JOIN stores reg ON reg.id = m.store_id
+    JOIN stores spend ON spend.id = pt.store_id
+    ${where}
+    ORDER BY pt.id DESC
+  `).all(...params).map((row) => ({
+      交易時間: row.交易時間,
+      會員編號: row.會員編號,
+      會員姓名: row.會員姓名,
+      會員Email: row.會員Email,
+      原註冊分店: row.原註冊分店,
+      消費分店: row.消費分店,
+      交易類型: zhType[row.交易類型] || row.交易類型,
+      點數: row.點數,
+      交易後餘額: row.交易後餘額,
+      備註: row.備註 || ""
+    }));
+}
+
+function requestReportRows(storeId = null) {
+  const where = storeId ? "WHERE dr.store_id = ?" : "";
+  const params = storeId ? [storeId] : [];
+  return db.prepare(`
+    SELECT dr.created_at AS 申請時間, m.member_code AS 會員編號, m.name AS 會員姓名, reg.store_name AS 原註冊分店,
+      spend.store_name AS 消費分店, dr.points AS 扣點點數, dr.status AS 狀態, dr.approved_at AS 會員核准時間, dr.description AS 備註
+    FROM deduction_requests dr
+    JOIN members m ON m.id = dr.member_id
+    JOIN stores reg ON reg.id = m.store_id
+    JOIN stores spend ON spend.id = dr.store_id
+    ${where}
+    ORDER BY dr.id DESC
+  `).all(...params).map((r) => ({ ...r, 狀態: zhStatus[r.狀態] || r.狀態 }));
+}
+
+function monthlyReportRows(storeId = null) {
+  const where = storeId ? "WHERE store_id = ?" : "";
+  const params = storeId ? [storeId] : [];
+  return db.prepare(`
+    SELECT strftime('%Y-%m', created_at) AS 月份,
+      COALESCE(SUM(CASE WHEN type='purchase' THEN points ELSE 0 END),0) AS 購買點數,
+      COALESCE(SUM(CASE WHEN type='gift' THEN points ELSE 0 END),0) AS 贈予點數,
+      COALESCE(SUM(CASE WHEN type='consume' THEN points ELSE 0 END),0) AS 消費點數
+    FROM point_transactions
+    ${where}
+    GROUP BY strftime('%Y-%m', created_at)
+    ORDER BY 月份 DESC
+  `).all(...params).map((r) => ({ ...r, 結餘變動: r.購買點數 + r.贈予點數 - r.消費點數 }));
+}
+
+function adminUserRows() {
+  return db.prepare(`
+    SELECT u.id AS 帳號ID, u.role AS 角色, u.name AS 姓名, u.email AS Email, u.phone AS 手機,
+      COALESCE(s.store_name, '') AS 所屬分店, u.status AS 狀態, u.is_super_admin AS 總部專職, u.created_at AS 建立時間
+    FROM users u LEFT JOIN stores s ON s.id = u.store_id
+    WHERE u.role IN ('admin','store')
+    ORDER BY u.role, u.id DESC
+  `).all();
+}
+
+function adminRequestRows() {
+  return db.prepare(`
+    SELECT ar.created_at AS 申請時間, ar.name AS 姓名, ar.email AS Email, ar.phone AS 手機, ar.role AS 角色,
+      COALESCE(s.store_name, '') AS 所屬分店, ar.status AS 狀態, requester.name AS 申請人,
+      reviewer.name AS 審核人, ar.reviewed_at AS 審核時間, ar.disabled_at AS 停用時間
+    FROM admin_account_requests ar
+    LEFT JOIN stores s ON s.id = ar.store_id
+    LEFT JOIN users requester ON requester.id = ar.requested_by
+    LEFT JOIN users reviewer ON reviewer.id = ar.reviewed_by
+    ORDER BY ar.id DESC
+  `).all();
+}
+
+function adminAuditRows() {
+  return db.prepare(`
+    SELECT event_at AS 事件時間, event_type AS 事件, login_email AS 登入Email, admin_name AS 管理員姓名,
+      ip AS 登入IP, user_agent AS UserAgent, result AS 結果, failure_reason AS 失敗原因, user_id AS 操作者ID, created_at AS 建立時間
+    FROM admin_audit_logs ORDER BY id DESC
+  `).all();
 }
 
 function adminDashboard(req, res, user) {
@@ -347,8 +702,8 @@ function storeMembers(req, res, user) {
     GROUP BY m.id
     ORDER BY m.id DESC
   `).all(user.store_id);
-  const table = rows.length ? `<table class="table"><thead><tr><th>會員</th><th>電話</th><th>購買</th><th>贈予</th><th>剩餘</th><th>操作</th></tr></thead><tbody>${rows.map((m) => `
-    <tr><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td><td><a class="button secondary" href="/store/members/${m.id}">詳細</a></td></tr>
+  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>電話</th><th>購買</th><th>贈予</th><th>剩餘</th><th>操作</th></tr></thead><tbody>${rows.map((m) => `
+    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td><td><a class="button secondary" href="/store/members/${m.id}">詳細</a></td></tr>
   `).join("")}</tbody></table>` : `<div class="empty">尚無會員。</div>`;
   send(res, 200, page("會員列表", `<div class="actions" style="margin-bottom:16px"><a class="button" href="/store/members/new">新增會員</a></div>${table}`, user));
 }
@@ -360,7 +715,7 @@ function storeMemberDetail(req, res, user, id) {
   const tx = db.prepare("SELECT * FROM point_transactions WHERE member_id = ? ORDER BY id DESC").all(member.id);
   send(res, 200, page("會員詳細資料", `${renderStatsCards(stats)}
     <div class="grid split" style="margin-top:16px">
-      <div class="panel"><h2>${escapeHtml(member.name)}</h2><p>${escapeHtml(member.phone)}｜${escapeHtml(member.email)}</p><h3>消費與點數紀錄</h3>${renderTransactions(tx)}</div>
+      <div class="panel"><h2>${escapeHtml(member.name)}</h2><p>會員編號：<b>${escapeHtml(member.member_code || "")}</b></p><p>${escapeHtml(member.phone)}｜${escapeHtml(member.email)}</p><h3>消費與點數紀錄</h3>${renderTransactions(tx)}</div>
       <div class="panel"><h2>新增點數 / 扣點要求</h2>
         <form class="stack" method="post" action="/store/members/${member.id}/transactions">
           <div class="field"><label>類型</label><select name="type"><option value="purchase">購買點數</option><option value="gift">贈予點數</option></select></div>
@@ -380,13 +735,15 @@ function storeMemberDetail(req, res, user, id) {
 
 function storeDeductions(req, res, user) {
   const rows = db.prepare(`
-    SELECT dr.*, m.name AS member_name, m.email AS member_email
-    FROM deduction_requests dr JOIN members m ON m.id = dr.member_id
+    SELECT dr.*, m.member_code, m.name AS member_name, m.email AS member_email, reg.store_name AS registered_store
+    FROM deduction_requests dr
+    JOIN members m ON m.id = dr.member_id
+    JOIN stores reg ON reg.id = m.store_id
     WHERE dr.store_id = ?
     ORDER BY dr.id DESC
   `).all(user.store_id);
-  const table = rows.length ? `<table class="table"><thead><tr><th>會員</th><th>點數</th><th>狀態</th><th>說明</th><th>建立時間</th></tr></thead><tbody>${rows.map((r) => `
-    <tr><td>${escapeHtml(r.member_name)}<br><span class="muted">${escapeHtml(r.member_email)}</span></td><td>${money(r.points)}</td><td><span class="badge">${zhStatus[r.status]}</span></td><td>${escapeHtml(r.description || "")}</td><td>${escapeHtml(r.created_at)}</td></tr>
+  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>原註冊分店</th><th>點數</th><th>狀態</th><th>說明</th><th>建立時間</th></tr></thead><tbody>${rows.map((r) => `
+    <tr><td>${escapeHtml(r.member_code || "")}</td><td>${escapeHtml(r.member_name)}<br><span class="muted">${escapeHtml(r.member_email)}</span></td><td>${escapeHtml(r.registered_store)}</td><td>${money(r.points)}</td><td><span class="badge">${zhStatus[r.status]}</span></td><td>${escapeHtml(r.description || "")}</td><td>${escapeHtml(r.created_at)}</td></tr>
   `).join("")}</tbody></table>` : `<div class="empty">尚無扣點要求。</div>`;
   send(res, 200, page("扣點要求列表", table, user));
 }
@@ -400,11 +757,138 @@ function memberDashboard(req, res, user) {
   const pendingHtml = pending.length ? `<table class="table"><thead><tr><th>點數</th><th>說明</th><th>時間</th><th>操作</th></tr></thead><tbody>${pending.map((r) => `
     <tr><td>${money(r.points)}</td><td>${escapeHtml(r.description || "")}</td><td>${escapeHtml(r.created_at)}</td><td class="actions"><form method="post" action="/member/deductions/${r.id}/approve"><button class="button">核准</button></form><form method="post" action="/member/deductions/${r.id}/reject"><button class="button danger">拒絕</button></form></td></tr>
   `).join("")}</tbody></table>` : `<div class="empty">目前沒有待核准扣點要求。</div>`;
-  send(res, 200, page("我的點數總覽", `${renderStatsCards(stats)}
+  send(res, 200, page("我的點數總覽", `<div class="panel" style="margin-bottom:16px"><b>會員編號：</b>${escapeHtml(member.member_code || "")}</div>${renderStatsCards(stats)}
     <div class="grid split" style="margin-top:16px">
       <div class="panel"><h2>待核准扣點要求</h2>${pendingHtml}</div>
       <div class="panel"><h2>點數與消費紀錄</h2>${renderTransactions(tx)}</div>
     </div>`, user));
+}
+
+function adminReports(req, res, user) {
+  send(res, 200, page("報表匯出中心", `<div class="panel"><h2>Excel 總報表</h2><p><a class="button" href="/admin/export/all.xlsx">下載 Excel 總報表</a></p></div>
+    <div class="panel" style="margin-top:16px"><h2>CSV 匯出</h2><div class="actions">
+      <a class="button secondary" href="/admin/export/stores.csv">分店資料 CSV</a>
+      <a class="button secondary" href="/admin/export/members.csv">會員資料 CSV</a>
+      <a class="button secondary" href="/admin/export/transactions.csv">交易紀錄 CSV</a>
+      <a class="button secondary" href="/admin/export/requests.csv">扣點紀錄 CSV</a>
+    </div></div>`, user));
+}
+
+function storeReports(req, res, user) {
+  send(res, 200, page("報表匯出中心", `<div class="panel"><h2>本分店 Excel 報表</h2><p><a class="button" href="/store/export/all.xlsx">下載本分店 Excel</a></p></div>
+    <div class="panel" style="margin-top:16px"><h2>CSV 匯出</h2><div class="actions">
+      <a class="button secondary" href="/store/export/members.csv">會員資料 CSV</a>
+      <a class="button secondary" href="/store/export/transactions.csv">交易紀錄 CSV</a>
+      <a class="button secondary" href="/store/export/requests.csv">扣點紀錄 CSV</a>
+    </div></div>`, user));
+}
+
+function crossStorePage(req, res, user, query = "", error = "") {
+  const q = query.trim();
+  const rows = q ? db.prepare(`
+    SELECT m.*, s.store_name
+    FROM members m JOIN stores s ON s.id = m.store_id
+    WHERE m.member_code = ? OR m.name LIKE ? OR m.phone LIKE ? OR m.email LIKE ?
+    ORDER BY CASE WHEN m.member_code = ? THEN 0 ELSE 1 END, m.id DESC
+    LIMIT 30
+  `).all(q, `%${q}%`, `%${q}%`, `%${q}%`, q).map((m) => ({ ...m, stats: memberStats(m.id) })) : [];
+  const result = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>手機</th><th>Email</th><th>原註冊分店</th><th>剩餘點數</th><th>扣點申請</th></tr></thead><tbody>${rows.map((m) => `
+    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}</td><td>${escapeHtml(m.phone)}</td><td>${escapeHtml(m.email)}</td><td>${escapeHtml(m.store_name)}</td><td>${money(m.stats.balance_points)}</td><td>
+      <form class="stack" method="post" action="/store/cross-store/deductions" style="max-width:260px">
+        <input type="hidden" name="member_id" value="${m.id}">
+        <input name="points" type="number" min="1" placeholder="扣點點數" required>
+        <input name="description" placeholder="扣點說明" required>
+        <button class="button secondary">送出申請</button>
+      </form>
+    </td></tr>`).join("")}</tbody></table>` : q ? `<div class="empty">查無會員。</div>` : "";
+  send(res, 200, page("跨店扣點 / 查找會員", `<div class="panel">${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}<form class="stack" method="get" action="/store/cross-store">
+    <div class="field"><label>搜尋會員編號、姓名、手機或 Email</label><input name="q" value="${escapeHtml(q)}" autofocus></div>
+    <button class="button">搜尋</button>
+  </form></div><div style="margin-top:16px">${result}</div>`, user));
+}
+
+function managerRequestForm(user, error = "", values = {}) {
+  const stores = db.prepare("SELECT id, store_name FROM stores ORDER BY id").all();
+  const roleOptions = user.role === "store" ? `<option value="store">分店管理員</option>` : `<option value="admin">總部管理員</option><option value="store">分店管理員</option>`;
+  const storeOptions = stores.map((s) => `<option value="${s.id}" ${String(values.store_id || user.store_id || "") === String(s.id) ? "selected" : ""}>${escapeHtml(s.store_name)}</option>`).join("");
+  return `${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}<form class="stack" method="post" action="${user.role === "admin" ? "/admin/manager-requests" : "/store/manager-requests"}">
+    <div class="field"><label>姓名</label><input name="name" value="${escapeHtml(values.name || "")}" required></div>
+    <div class="field"><label>Email</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
+    <div class="field"><label>手機</label><input name="phone" value="${escapeHtml(values.phone || "")}"></div>
+    <div class="field"><label>角色</label><select name="role">${roleOptions}</select></div>
+    <div class="field"><label>所屬分店</label><select name="store_id"><option value="">無</option>${storeOptions}</select></div>
+    <button class="button">送出申請</button>
+  </form><p class="muted">核准後初始密碼為 ${DEFAULT_MANAGER_PASSWORD}，使用者可登入後自行修改。</p>`;
+}
+
+function managerRequestsPage(res, user, error = "") {
+  const rows = db.prepare(`
+    SELECT ar.*, s.store_name, requester.name AS requester_name, reviewer.name AS reviewer_name
+    FROM admin_account_requests ar
+    LEFT JOIN stores s ON s.id = ar.store_id
+    LEFT JOIN users requester ON requester.id = ar.requested_by
+    LEFT JOIN users reviewer ON reviewer.id = ar.reviewed_by
+    ${user.role === "store" ? "WHERE ar.store_id = ?" : ""}
+    ORDER BY ar.id DESC
+  `).all(...(user.role === "store" ? [user.store_id] : []));
+  const table = rows.length ? `<table class="table"><thead><tr><th>申請時間</th><th>姓名</th><th>Email</th><th>角色</th><th>分店</th><th>狀態</th><th>審核</th></tr></thead><tbody>${rows.map((r) => `
+    <tr><td>${escapeHtml(r.created_at)}</td><td>${escapeHtml(r.name)}<br><span class="muted">${escapeHtml(r.phone || "")}</span></td><td>${escapeHtml(r.email)}</td><td>${escapeHtml(r.role)}</td><td>${escapeHtml(r.store_name || "")}</td><td><span class="badge">${escapeHtml(r.status)}</span></td><td>${isSuperAdmin(user) && r.status === "pending" ? `<form class="actions" method="post" action="/admin/manager-requests/${r.id}/review"><button class="button" name="decision" value="approved">核准</button><button class="button danger" name="decision" value="rejected">拒絕</button></form>` : ""}</td></tr>
+  `).join("")}</tbody></table>` : `<div class="empty">尚無申請紀錄。</div>`;
+  const users = user.role === "admin" ? adminUserRows() : adminUserRows().filter((u) => u.角色 === "store" && u.所屬分店 === storeForUser(user)?.store_name);
+  const userTable = `<table class="table"><thead><tr><th>ID</th><th>角色</th><th>姓名</th><th>Email</th><th>分店</th><th>狀態</th><th>操作</th></tr></thead><tbody>${users.map((u) => `
+    <tr><td>${u.帳號ID}</td><td>${escapeHtml(u.角色)}</td><td>${escapeHtml(u.姓名)}</td><td>${escapeHtml(u.Email)}</td><td>${escapeHtml(u.所屬分店)}</td><td>${escapeHtml(u.狀態)}</td><td>${isSuperAdmin(user) && u.總部專職 !== 1 ? `<form method="post" action="/admin/users/${u.帳號ID}/status"><button class="button secondary" name="status" value="${u.狀態 === "active" ? "disabled" : "active"}">${u.狀態 === "active" ? "停用" : "恢復"}</button></form>` : ""}</td></tr>
+  `).join("")}</tbody></table>`;
+  send(res, 200, page("管理員帳號申請 / 核准", `<div class="grid split"><div class="panel"><h2>提出申請</h2>${managerRequestForm(user, error)}</div><div class="panel"><h2>管理員帳號</h2>${userTable}</div></div><div class="panel" style="margin-top:16px"><h2>申請紀錄</h2>${table}</div>`, user));
+}
+
+function adminAuditPage(res, user) {
+  if (!isSuperAdmin(user)) return send(res, 403, page("無權限", `<div class="empty">只有總部專職管理員可查看操作紀錄。</div>`, user));
+  const rows = adminAuditRows();
+  const table = rows.length ? `<table class="table"><thead><tr>${Object.keys(rows[0]).map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${Object.keys(r).map((h) => `<td>${escapeHtml(r[h] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table>` : `<div class="empty">尚無操作紀錄。</div>`;
+  send(res, 200, page("總部管理員操作紀錄", table, user));
+}
+
+function handleExport(req, res, pathname) {
+  if (pathname.startsWith("/admin/export/")) {
+    const user = requireUser(req, res, ["admin"]); if (!user) return true;
+    if (pathname.endsWith("/all.xlsx")) {
+      sendXlsx(res, "joy-yanmo-all-report.xlsx", [
+        { name: "分店總覽", rows: storeReportRows() },
+        { name: "會員總覽", rows: memberReportRows() },
+        { name: "點數交易紀錄", rows: transactionReportRows() },
+        { name: "扣點申請紀錄", rows: requestReportRows() },
+        { name: "月報統計", rows: monthlyReportRows() },
+        { name: "管理員帳號", rows: adminUserRows() },
+        { name: "管理員申請紀錄", rows: adminRequestRows() },
+        { name: "總部登入登出紀錄", rows: isSuperAdmin(user) ? adminAuditRows() : [] }
+      ]);
+      return true;
+    }
+    if (pathname.endsWith("/stores.csv")) sendCsv(res, "stores.csv", storeReportRows());
+    else if (pathname.endsWith("/members.csv")) sendCsv(res, "members.csv", memberReportRows());
+    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, "transactions.csv", transactionReportRows());
+    else if (pathname.endsWith("/requests.csv")) sendCsv(res, "requests.csv", requestReportRows());
+    else return false;
+    return true;
+  }
+  if (pathname.startsWith("/store/export/")) {
+    const user = requireUser(req, res, ["store"]); if (!user) return true;
+    if (pathname.endsWith("/all.xlsx")) {
+      sendXlsx(res, "joy-yanmo-store-report.xlsx", [
+        { name: "會員資料", rows: memberReportRows(user.store_id) },
+        { name: "交易紀錄", rows: transactionReportRows(user.store_id) },
+        { name: "扣點紀錄", rows: requestReportRows(user.store_id) },
+        { name: "月報統計", rows: monthlyReportRows(user.store_id) }
+      ]);
+      return true;
+    }
+    if (pathname.endsWith("/members.csv")) sendCsv(res, "store-members.csv", memberReportRows(user.store_id));
+    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, "store-transactions.csv", transactionReportRows(user.store_id));
+    else if (pathname.endsWith("/requests.csv")) sendCsv(res, "store-requests.csv", requestReportRows(user.store_id));
+    else return false;
+    return true;
+  }
+  return false;
 }
 
 async function handlePost(req, res, pathname) {
@@ -412,17 +896,40 @@ async function handlePost(req, res, pathname) {
   if (pathname === "/login") {
     const user = db.prepare("SELECT * FROM users WHERE email = ? AND role = ?").get(body.email, body.role);
     if (!user || !verifyPassword(body.password, user.password_hash)) {
+      if (body.role === "admin") {
+        const admin = db.prepare("SELECT * FROM users WHERE email = ? AND role = 'admin'").get(body.email);
+        recordAdminAudit(req, {
+          eventType: "login",
+          email: body.email,
+          user: admin || null,
+          result: "failed",
+          failureReason: admin ? "密碼錯誤" : "帳號不存在"
+        });
+      }
       return send(res, 401, loginPage(body.role || "member", "帳號或密碼不正確。", body.slug || ""));
+    }
+    if (user.status === "disabled") {
+      if (body.role === "admin") {
+        recordAdminAudit(req, { eventType: "login", email: body.email, user, result: "failed", failureReason: "帳號停用" });
+      }
+      return send(res, 403, loginPage(body.role || "member", "此帳號已停用，請聯絡管理員。", body.slug || ""));
     }
     if (body.role === "store" && body.slug) {
       const store = db.prepare("SELECT * FROM stores WHERE platform_slug = ?").get(body.slug);
       if (!store || store.id !== user.store_id) return send(res, 403, loginPage("store", "此帳號不屬於這個分店連結。", body.slug));
     }
     const target = user.role === "admin" ? "/admin/dashboard" : user.role === "store" ? "/store/dashboard" : "/member/dashboard";
+    if (user.role === "admin") {
+      recordAdminAudit(req, { eventType: "login", email: user.email, user, result: "success" });
+    }
     res.writeHead(302, { "Set-Cookie": `session=${encodeURIComponent(makeToken(user))}; HttpOnly; SameSite=Lax; Path=/; ${COOKIE_SECURE ? "Secure; " : ""}`, Location: target });
     return res.end();
   }
   if (pathname === "/logout") {
+    const user = currentUser(req);
+    if (user?.role === "admin") {
+      recordAdminAudit(req, { eventType: "logout", email: user.email, user, result: "success" });
+    }
     res.writeHead(302, { "Set-Cookie": "session=; Max-Age=0; Path=/", Location: "/" });
     return res.end();
   }
@@ -477,9 +984,9 @@ async function handlePost(req, res, pathname) {
         VALUES ('member', ?, ?, ?, ?, ?) RETURNING id
       `).get(body.name, body.phone, body.email, hashPassword(body.password || "password123"), user.store_id);
       const member = db.prepare(`
-        INSERT INTO members (store_id, user_id, name, phone, email)
-        VALUES (?, ?, ?, ?, ?) RETURNING id
-      `).get(user.store_id, newUser.id, body.name, body.phone, body.email);
+        INSERT INTO members (store_id, user_id, member_code, name, phone, email)
+        VALUES (?, ?, ?, ?, ?, ?) RETURNING id
+      `).get(user.store_id, newUser.id, generateMemberCode(), body.name, body.phone, body.email);
       db.exec("COMMIT");
       return redirect(res, `/store/members/${member.id}`);
     } catch (error) {
@@ -489,6 +996,72 @@ async function handlePost(req, res, pathname) {
       }
       throw error;
     }
+  }
+  if (pathname === "/store/cross-store/deductions") {
+    const user = requireUser(req, res, ["store"]); if (!user) return;
+    const member = db.prepare("SELECT id FROM members WHERE id = ?").get(body.member_id);
+    if (!member) return crossStorePage(req, res, user, "", "找不到會員。");
+    db.prepare(`
+      INSERT INTO deduction_requests (store_id, member_id, points, description, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `).run(user.store_id, member.id, Number(body.points), body.description || "");
+    return redirect(res, "/store/deductions");
+  }
+  if (pathname === "/admin/manager-requests" || pathname === "/store/manager-requests") {
+    const user = requireUser(req, res, ["admin", "store"]); if (!user) return;
+    const role = user.role === "store" ? "store" : body.role;
+    const storeId = role === "store" ? Number(body.store_id || user.store_id) : null;
+    if (role === "store" && !storeId) return managerRequestsPage(res, user, "分店管理員必須選擇所屬分店。");
+    try {
+      db.prepare(`
+        INSERT INTO admin_account_requests (name, email, phone, role, store_id, status, requested_by)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      `).run(body.name, body.email, body.phone || "", role, storeId, user.id);
+      return redirect(res, user.role === "admin" ? "/admin/manager-requests" : "/store/manager-requests");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, duplicateEmailMessage());
+      throw error;
+    }
+  }
+  const reviewMatch = pathname.match(/^\/admin\/manager-requests\/(\d+)\/review$/);
+  if (reviewMatch) {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (!isSuperAdmin(user)) return send(res, 403, page("無權限", `<div class="empty">只有總部專職管理員可以核准或拒絕。</div>`, user));
+    const request = db.prepare("SELECT * FROM admin_account_requests WHERE id = ? AND status = 'pending'").get(reviewMatch[1]);
+    if (!request) return redirect(res, "/admin/manager-requests");
+    if (body.decision === "rejected") {
+      db.prepare("UPDATE admin_account_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(user.id, request.id);
+      return redirect(res, "/admin/manager-requests");
+    }
+    try {
+      db.exec("BEGIN");
+      const newUser = db.prepare(`
+        INSERT INTO users (role, name, phone, email, password_hash, store_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'active') RETURNING id
+      `).get(request.role, request.name, request.phone || "", request.email, hashPassword(DEFAULT_MANAGER_PASSWORD), request.role === "store" ? request.store_id : null);
+      db.prepare("UPDATE admin_account_requests SET status = 'approved', user_id = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(newUser.id, user.id, request.id);
+      db.exec("COMMIT");
+      return redirect(res, "/admin/manager-requests");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, duplicateEmailMessage());
+      throw error;
+    }
+  }
+  const statusMatch = pathname.match(/^\/admin\/users\/(\d+)\/status$/);
+  if (statusMatch) {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (!isSuperAdmin(user)) return send(res, 403, page("無權限", `<div class="empty">只有總部專職管理員可以停用或恢復管理員。</div>`, user));
+    const target = db.prepare("SELECT * FROM users WHERE id = ? AND role IN ('admin','store')").get(statusMatch[1]);
+    if (target && target.is_super_admin !== 1) {
+      const status = body.status === "active" ? "active" : "disabled";
+      db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, target.id);
+      db.prepare(`
+        INSERT INTO admin_account_requests (name, email, phone, role, store_id, status, user_id, requested_by, reviewed_by, reviewed_at, disabled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? = 'disabled' THEN CURRENT_TIMESTAMP ELSE NULL END)
+      `).run(target.name, target.email, target.phone || "", target.role, target.store_id, status, target.id, user.id, user.id, status);
+    }
+    return redirect(res, "/admin/manager-requests");
   }
   const txMatch = pathname.match(/^\/store\/members\/(\d+)\/transactions$/);
   if (txMatch) {
@@ -560,6 +1133,7 @@ async function router(req, res) {
     const pathname = url.pathname.replace(/\/+$/, "") || "/";
     if (pathname === "/healthz") return sendText(res, 200, "ok");
     if (pathname.startsWith("/public/") && serveStatic(res, pathname)) return;
+    if (req.method === "GET" && handleExport(req, res, pathname)) return;
     if (req.method === "POST") return handlePost(req, res, pathname);
 
     if (pathname === "/") return redirect(res, "/admin/login");
@@ -577,6 +1151,9 @@ async function router(req, res) {
     }
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
+    if (pathname === "/admin/reports") { const user = requireUser(req, res, ["admin"]); if (user) return adminReports(req, res, user); return; }
+    if (pathname === "/admin/manager-requests") { const user = requireUser(req, res, ["admin"]); if (user) return managerRequestsPage(res, user); return; }
+    if (pathname === "/admin/audit-logs") { const user = requireUser(req, res, ["admin"]); if (user) return adminAuditPage(res, user); return; }
     if (pathname === "/admin/stores") { const user = requireUser(req, res, ["admin"]); if (user) return adminStores(req, res, user); return; }
     if (pathname === "/admin/stores/new") { const user = requireUser(req, res, ["admin"]); if (user) return send(res, 200, page("新增分店", storeForm(), user)); return; }
     const adminStore = pathname.match(/^\/admin\/stores\/(\d+)$/);
@@ -585,6 +1162,9 @@ async function router(req, res) {
     if (adminView) { const user = requireUser(req, res, ["admin"]); if (user) return renderStoreDashboard(res, user, adminView[1], true); return; }
 
     if (pathname === "/store/dashboard") { const user = requireUser(req, res, ["store"]); if (user) return renderStoreDashboard(res, user, user.store_id); return; }
+    if (pathname === "/store/reports") { const user = requireUser(req, res, ["store"]); if (user) return storeReports(req, res, user); return; }
+    if (pathname === "/store/cross-store") { const user = requireUser(req, res, ["store"]); if (user) return crossStorePage(req, res, user, url.searchParams.get("q") || ""); return; }
+    if (pathname === "/store/manager-requests") { const user = requireUser(req, res, ["store"]); if (user) return managerRequestsPage(res, user); return; }
     if (pathname === "/store/members") { const user = requireUser(req, res, ["store"]); if (user) return storeMembers(req, res, user); return; }
     if (pathname === "/store/members/new") { const user = requireUser(req, res, ["store"]); if (user) return send(res, 200, page("新增會員", memberForm(), user)); return; }
     const memberDetail = pathname.match(/^\/store\/members\/(\d+)$/);

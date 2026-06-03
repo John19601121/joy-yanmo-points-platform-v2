@@ -33,21 +33,28 @@ function hashPassword(password) {
   return `pbkdf2$${iterations}$${salt}$${hash}`;
 }
 
-const existingAdmin = db.prepare("SELECT id, email FROM users WHERE role = 'admin' LIMIT 1").get();
+const superAdminEmail = "luodayu168@gmail.com";
+const superAdminPassword = "QazxsW12345";
+const existingSuperAdmin = db.prepare("SELECT id, email FROM users WHERE role = 'admin' AND email = ? LIMIT 1").get(superAdminEmail);
 
-if (existingAdmin) {
-  console.log(`Database ready. Existing admin: ${existingAdmin.email}`);
+if (existingSuperAdmin) {
+  try {
+    db.prepare("UPDATE users SET status = 'active', is_super_admin = 1 WHERE id = ?").run(existingSuperAdmin.id);
+  } catch {
+    // Older databases are migrated by server.js on startup.
+  }
+  console.log(`Database ready. Existing super admin: ${existingSuperAdmin.email}`);
   process.exit(0);
 }
 
-const adminEmail = process.env.INITIAL_ADMIN_EMAIL || "admin@joy-yanmo.test";
-const adminPassword = process.env.INITIAL_ADMIN_PASSWORD || "password123";
-const adminName = process.env.INITIAL_ADMIN_NAME || "總部管理員";
+const adminEmail = process.env.INITIAL_ADMIN_EMAIL || superAdminEmail;
+const adminPassword = process.env.INITIAL_ADMIN_PASSWORD || superAdminPassword;
+const adminName = process.env.INITIAL_ADMIN_NAME || "總部專職管理員";
 
 db.prepare(`
-  INSERT INTO users (role, name, phone, email, password_hash)
-  VALUES ('admin', ?, ?, ?, ?)
-`).run(adminName, process.env.INITIAL_ADMIN_PHONE || "", adminEmail, hashPassword(adminPassword));
+  INSERT INTO users (role, name, phone, email, password_hash, status, is_super_admin)
+  VALUES ('admin', ?, ?, ?, ?, 'active', ?)
+`).run(adminName, process.env.INITIAL_ADMIN_PHONE || "", adminEmail, hashPassword(adminPassword), adminEmail === superAdminEmail ? 1 : 0);
 
 console.log("Database ready. Initial admin created.");
 console.log(`Admin email: ${adminEmail}`);
