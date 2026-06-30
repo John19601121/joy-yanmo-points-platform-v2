@@ -1,0 +1,16 @@
+{
+  "name": "lt-health-sales-points-platform",
+  "version": "1.0.0",
+  "description": "LT大健康成交會員積分管理平台 MVP",
+  "main": "server.js",
+  "scripts": {
+    "start": "node scripts/init-db.js && node server.js",
+    "start:local": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node scripts/seed.js",
+    "init-db": "node scripts/init-db.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
