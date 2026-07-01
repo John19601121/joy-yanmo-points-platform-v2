@@ -1,7 +1,7 @@
 {
-  "name": "joy-yanmo-points-platform",
+  "name": "lt-health-sales-points-platform",
   "version": "1.0.0",
-  "description": "卓悅研墨會員點數管理平台 MVP",
+  "description": "LT 大健康成交會員積分管理平台 V1.0 正式版",
   "main": "server.js",
   "scripts": {
     "start": "node scripts/init-db.js && node server.js",

@@ -38,18 +38,18 @@ const passwordHash = hashPassword("password123");
 
 db.prepare(`
   INSERT INTO users (role, name, phone, email, password_hash)
-  VALUES ('admin', '總部管理員', '0900000000', 'admin@joy-yanmo.test', ?)
+  VALUES ('admin', '總部管理員', '0900000000', 'admin@lt-health-sales.test', ?)
 `).run(passwordHash);
 
 const store = db.prepare(`
   INSERT INTO stores (store_name, contact_name, phone, email, platform_slug)
-  VALUES ('台北信義旗艦店', '王店長', '02-2345-6789', 'taipei@joy-yanmo.test', 'taipei-xinyi')
+  VALUES ('台北信義旗艦店', '王店長', '02-2345-6789', 'taipei@lt-health-sales.test', 'taipei-xinyi')
   RETURNING id
 `).get();
 
 db.prepare(`
   INSERT INTO users (role, name, phone, email, password_hash, store_id)
-  VALUES ('store', '台北信義旗艦店', '02-2345-6789', 'taipei@joy-yanmo.test', ?, ?)
+  VALUES ('store', '台北信義旗艦店', '02-2345-6789', 'taipei@lt-health-sales.test', ?, ?)
 `).run(passwordHash, store.id);
 
 const memberUser = db.prepare(`
@@ -80,6 +80,6 @@ db.prepare(`
 `).run(store.id, member.id);
 
 console.log("Seed completed.");
-console.log("Admin: admin@joy-yanmo.test / password123");
-console.log("Store: taipei@joy-yanmo.test / password123");
+console.log("Admin: admin@lt-health-sales.test / password123");
+console.log("Store: taipei@lt-health-sales.test / password123");
 console.log("Member: member.lin@example.com / password123");

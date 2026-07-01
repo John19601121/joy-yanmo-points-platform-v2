@@ -12,13 +12,16 @@ const HOST = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0
 const DB_PATH = path.resolve(ROOT, process.env.DATABASE_PATH || "data/app.sqlite");
 const SCHEMA_PATH = path.join(ROOT, "schema.sql");
 const PUBLIC_DIR = path.join(ROOT, "public");
-const SESSION_SECRET = process.env.SESSION_SECRET || "dev-change-me-joy-yanmo";
+const PLATFORM_NAME = "LT 大健康成交會員積分管理平台";
+const PLATFORM_VERSION = "V1.0 正式版";
+const EXPORT_PREFIX = "lt-health-sales-points";
+const SESSION_SECRET = process.env.SESSION_SECRET || "dev-change-me-lt-health-sales";
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
 const SUPER_ADMIN_EMAIL = "luodayu168@gmail.com";
 const SUPER_ADMIN_INITIAL_PASSWORD = "QazxsW12345";
 const DEFAULT_MANAGER_PASSWORD = "password123";
 
-if (process.env.NODE_ENV === "production" && SESSION_SECRET === "dev-change-me-joy-yanmo") {
+if (process.env.NODE_ENV === "production" && SESSION_SECRET === "dev-change-me-lt-health-sales") {
   throw new Error("Production requires SESSION_SECRET.");
 }
 
@@ -92,9 +95,17 @@ function runMigrations() {
   if (!columnExists("users", "is_super_admin")) db.exec("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0;");
   if (!columnExists("members", "member_code")) db.exec("ALTER TABLE members ADD COLUMN member_code TEXT;");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_members_member_code ON members(member_code);");
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email ON users(email, role) WHERE role = 'admin';");
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_email ON users(email, role) WHERE role = 'member';");
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_email_store ON users(email, role, store_id) WHERE role = 'store';");
+  db.exec("DROP INDEX IF EXISTS idx_users_admin_email;");
+  db.exec("DROP INDEX IF EXISTS idx_users_member_email;");
+  db.exec("DROP INDEX IF EXISTS idx_users_store_email_store;");
+  db.exec("DROP INDEX IF EXISTS idx_users_store_email;");
+  for (const role of ["admin", "store", "member"]) {
+    try {
+      db.exec(`CREATE UNIQUE INDEX idx_users_${role}_email ON users(lower(email), role) WHERE role = '${role}';`);
+    } catch (error) {
+      console.warn(`既有資料含有重複的 ${role} Email；系統將阻止新增同角色重複 Email，請由總部管理員整理既有帳號。`, error.message);
+    }
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS admin_account_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,7 +159,7 @@ function ensureSuperAdmin() {
 
 function generateMemberCode() {
   const ym = new Date().toISOString().slice(0, 7).replace("-", "");
-  const prefix = `YM${ym}`;
+  const prefix = `LT${ym}`;
   const last = db.prepare("SELECT member_code FROM members WHERE member_code LIKE ? ORDER BY member_code DESC LIMIT 1").get(`${prefix}%`);
   const next = last?.member_code ? Number(last.member_code.slice(-5)) + 1 : 1;
   return `${prefix}${String(next).padStart(5, "0")}`;
@@ -233,11 +244,24 @@ function sendText(res, status, body, headers = {}) {
 }
 
 function isUniqueConstraintError(error) {
-  return String(error?.message || "").includes("UNIQUE constraint failed");
+  return String(error?.code || "").includes("SQLITE_CONSTRAINT_UNIQUE") || /unique constraint/i.test(String(error?.message || ""));
 }
 
-function duplicateEmailMessage() {
-  return "此 Email 已在相同角色中使用，請更換 Email。";
+function uniqueConstraintMessage(error) {
+  const message = String(error?.message || "");
+  if (/email|idx_users_.*_email/i.test(message)) return "此 Email 已在相同角色中使用，請更換 Email。";
+  if (/members\.store_id, members\.phone/i.test(message)) return "此手機號碼已在本分店使用，請確認會員資料。";
+  if (/platform_slug/i.test(message)) return "此分店網址識別碼已存在，請重新送出。";
+  if (/member_code/i.test(message)) return "會員編號發生重複，請重新送出。";
+  return "資料已存在，請確認後再試。";
+}
+
+function emailExistsForRole(email, role) {
+  return Boolean(db.prepare("SELECT id FROM users WHERE lower(email) = lower(?) AND role = ? LIMIT 1").get(String(email || "").trim(), role));
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
 }
 
 function clientIp(req) {
@@ -339,7 +363,8 @@ function page(title, content, user = null) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(title)}｜卓悅研墨會員點數管理平台</title>
+  <title>${escapeHtml(title)}｜${PLATFORM_NAME}</title>
+  <link rel="icon" type="image/png" href="/public/favicon.png">
   <style>
     :root{--ink:#24322f;--muted:#6d7773;--line:#e4e8e5;--paper:#fbfaf7;--jade:#e8f2ec;--gold:#b9964d;--deep:#19362f;--white:#fff}
     *{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;background:var(--paper);color:var(--ink);letter-spacing:0}
@@ -348,8 +373,8 @@ function page(title, content, user = null) {
 </head>
 <body>
   <div class="${user ? "shell" : ""}">
-    ${user ? `<aside class="side"><div class="brand"><img src="/public/logo.png" alt="Logo"><div><b>卓悅研墨</b><span>會員點數管理平台</span></div></div>${nav(user)}</aside>` : ""}
-    <main class="${user ? "main" : ""}">${user ? `<div class="top"><div><div class="kicker">JOY YANMO POINTS</div><h1>${escapeHtml(title)}</h1></div><div class="user">${escapeHtml(user.name)}・${escapeHtml(user.role)}</div></div>` : ""}${content}</main>
+    ${user ? `<aside class="side"><div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>${nav(user)}</aside>` : ""}
+    <main class="${user ? "main" : ""}">${user ? `<div class="top"><div><div class="kicker">LT HEALTH SALES POINTS・${PLATFORM_VERSION}</div><h1>${escapeHtml(title)}</h1></div><div class="user">${escapeHtml(user.name)}・${escapeHtml(user.role)}</div></div>` : ""}${content}</main>
   </div>
 </body>
 </html>`;
@@ -359,7 +384,7 @@ function loginPage(role, error = "", slug = "") {
   const title = role === "admin" ? "總部登入" : role === "store" ? "分店登入" : "會員登入";
   return page(title, `<div class="login">
     <section class="login-card">
-      <div class="brand"><img src="/public/logo.png" alt="Logo"><div><b>卓悅研墨</b><span>會員點數管理平台</span></div></div>
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
       <h1>${title}</h1>
       <p class="muted">請使用您的 ${title.replace("登入", "")} 帳號進入平台。</p>
       ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
@@ -852,7 +877,8 @@ function handleExport(req, res, pathname) {
   if (pathname.startsWith("/admin/export/")) {
     const user = requireUser(req, res, ["admin"]); if (!user) return true;
     if (pathname.endsWith("/all.xlsx")) {
-      sendXlsx(res, "joy-yanmo-all-report.xlsx", [
+      sendXlsx(res, `${EXPORT_PREFIX}-all-report.xlsx`, [
+        { name: "平台資訊", rows: [{ 平台名稱: PLATFORM_NAME, 版本: PLATFORM_VERSION }] },
         { name: "分店總覽", rows: storeReportRows() },
         { name: "會員總覽", rows: memberReportRows() },
         { name: "點數交易紀錄", rows: transactionReportRows() },
@@ -864,17 +890,18 @@ function handleExport(req, res, pathname) {
       ]);
       return true;
     }
-    if (pathname.endsWith("/stores.csv")) sendCsv(res, "stores.csv", storeReportRows());
-    else if (pathname.endsWith("/members.csv")) sendCsv(res, "members.csv", memberReportRows());
-    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, "transactions.csv", transactionReportRows());
-    else if (pathname.endsWith("/requests.csv")) sendCsv(res, "requests.csv", requestReportRows());
+    if (pathname.endsWith("/stores.csv")) sendCsv(res, `${EXPORT_PREFIX}-stores.csv`, storeReportRows());
+    else if (pathname.endsWith("/members.csv")) sendCsv(res, `${EXPORT_PREFIX}-members.csv`, memberReportRows());
+    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, `${EXPORT_PREFIX}-transactions.csv`, transactionReportRows());
+    else if (pathname.endsWith("/requests.csv")) sendCsv(res, `${EXPORT_PREFIX}-requests.csv`, requestReportRows());
     else return false;
     return true;
   }
   if (pathname.startsWith("/store/export/")) {
     const user = requireUser(req, res, ["store"]); if (!user) return true;
     if (pathname.endsWith("/all.xlsx")) {
-      sendXlsx(res, "joy-yanmo-store-report.xlsx", [
+      sendXlsx(res, `${EXPORT_PREFIX}-store-report.xlsx`, [
+        { name: "平台資訊", rows: [{ 平台名稱: PLATFORM_NAME, 版本: PLATFORM_VERSION }] },
         { name: "會員資料", rows: memberReportRows(user.store_id) },
         { name: "交易紀錄", rows: transactionReportRows(user.store_id) },
         { name: "扣點紀錄", rows: requestReportRows(user.store_id) },
@@ -882,9 +909,9 @@ function handleExport(req, res, pathname) {
       ]);
       return true;
     }
-    if (pathname.endsWith("/members.csv")) sendCsv(res, "store-members.csv", memberReportRows(user.store_id));
-    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, "store-transactions.csv", transactionReportRows(user.store_id));
-    else if (pathname.endsWith("/requests.csv")) sendCsv(res, "store-requests.csv", requestReportRows(user.store_id));
+    if (pathname.endsWith("/members.csv")) sendCsv(res, `${EXPORT_PREFIX}-store-members.csv`, memberReportRows(user.store_id));
+    else if (pathname.endsWith("/transactions.csv")) sendCsv(res, `${EXPORT_PREFIX}-store-transactions.csv`, transactionReportRows(user.store_id));
+    else if (pathname.endsWith("/requests.csv")) sendCsv(res, `${EXPORT_PREFIX}-store-requests.csv`, requestReportRows(user.store_id));
     else return false;
     return true;
   }
@@ -894,13 +921,14 @@ function handleExport(req, res, pathname) {
 async function handlePost(req, res, pathname) {
   const body = await readBody(req);
   if (pathname === "/login") {
-    const user = db.prepare("SELECT * FROM users WHERE email = ? AND role = ?").get(body.email, body.role);
+    const loginEmail = normalizeEmail(body.email);
+    const user = db.prepare("SELECT * FROM users WHERE lower(email) = ? AND role = ?").get(loginEmail, body.role);
     if (!user || !verifyPassword(body.password, user.password_hash)) {
       if (body.role === "admin") {
-        const admin = db.prepare("SELECT * FROM users WHERE email = ? AND role = 'admin'").get(body.email);
+        const admin = db.prepare("SELECT * FROM users WHERE lower(email) = ? AND role = 'admin'").get(loginEmail);
         recordAdminAudit(req, {
           eventType: "login",
-          email: body.email,
+          email: loginEmail,
           user: admin || null,
           result: "failed",
           failureReason: admin ? "密碼錯誤" : "帳號不存在"
@@ -954,45 +982,51 @@ async function handlePost(req, res, pathname) {
   }
   if (pathname === "/admin/stores") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (emailExistsForRole(body.email, "store")) {
+      return send(res, 400, page("新增分店", storeForm("此 Email 已在相同角色中使用，請更換 Email。", body), user));
+    }
     try {
       const slug = slugify(body.store_name);
       db.exec("BEGIN");
       const store = db.prepare(`
         INSERT INTO stores (store_name, contact_name, phone, email, platform_slug)
         VALUES (?, ?, ?, ?, ?) RETURNING id
-      `).get(body.store_name, body.contact_name, body.phone, body.email, slug);
+      `).get(body.store_name, body.contact_name, body.phone, normalizeEmail(body.email), slug);
       db.prepare(`
         INSERT INTO users (role, name, phone, email, password_hash, store_id)
         VALUES ('store', ?, ?, ?, ?, ?)
-      `).run(body.store_name, body.phone, body.email, hashPassword(body.password || "password123"), store.id);
+      `).run(body.store_name, body.phone, normalizeEmail(body.email), hashPassword(body.password || "password123"), store.id);
       db.exec("COMMIT");
       return redirect(res, `/admin/stores/${store.id}`);
     } catch (error) {
       db.exec("ROLLBACK");
       if (isUniqueConstraintError(error)) {
-        return send(res, 400, page("新增分店", storeForm(duplicateEmailMessage(), body), user));
+        return send(res, 400, page("新增分店", storeForm(uniqueConstraintMessage(error), body), user));
       }
       throw error;
     }
   }
   if (pathname === "/store/members") {
     const user = requireUser(req, res, ["store"]); if (!user) return;
+    if (emailExistsForRole(body.email, "member")) {
+      return send(res, 400, page("新增會員", memberForm("此 Email 已在相同角色中使用，請更換 Email。", body), user));
+    }
     try {
       db.exec("BEGIN");
       const newUser = db.prepare(`
         INSERT INTO users (role, name, phone, email, password_hash, store_id)
         VALUES ('member', ?, ?, ?, ?, ?) RETURNING id
-      `).get(body.name, body.phone, body.email, hashPassword(body.password || "password123"), user.store_id);
+      `).get(body.name, body.phone, normalizeEmail(body.email), hashPassword(body.password || "password123"), user.store_id);
       const member = db.prepare(`
         INSERT INTO members (store_id, user_id, member_code, name, phone, email)
         VALUES (?, ?, ?, ?, ?, ?) RETURNING id
-      `).get(user.store_id, newUser.id, generateMemberCode(), body.name, body.phone, body.email);
+      `).get(user.store_id, newUser.id, generateMemberCode(), body.name, body.phone, normalizeEmail(body.email));
       db.exec("COMMIT");
       return redirect(res, `/store/members/${member.id}`);
     } catch (error) {
       db.exec("ROLLBACK");
       if (isUniqueConstraintError(error)) {
-        return send(res, 400, page("新增會員", memberForm(duplicateEmailMessage(), body), user));
+        return send(res, 400, page("新增會員", memberForm(uniqueConstraintMessage(error), body), user));
       }
       throw error;
     }
@@ -1012,14 +1046,17 @@ async function handlePost(req, res, pathname) {
     const role = user.role === "store" ? "store" : body.role;
     const storeId = role === "store" ? Number(body.store_id || user.store_id) : null;
     if (role === "store" && !storeId) return managerRequestsPage(res, user, "分店管理員必須選擇所屬分店。");
+    if (emailExistsForRole(body.email, role)) return managerRequestsPage(res, user, "此 Email 已在相同角色中使用，請更換 Email。");
+    const pendingRequest = db.prepare("SELECT id FROM admin_account_requests WHERE lower(email) = lower(?) AND role = ? AND status = 'pending' LIMIT 1").get(body.email, role);
+    if (pendingRequest) return managerRequestsPage(res, user, "此 Email 已有相同角色的待審核申請。");
     try {
       db.prepare(`
         INSERT INTO admin_account_requests (name, email, phone, role, store_id, status, requested_by)
         VALUES (?, ?, ?, ?, ?, 'pending', ?)
-      `).run(body.name, body.email, body.phone || "", role, storeId, user.id);
+      `).run(body.name, normalizeEmail(body.email), body.phone || "", role, storeId, user.id);
       return redirect(res, user.role === "admin" ? "/admin/manager-requests" : "/store/manager-requests");
     } catch (error) {
-      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, duplicateEmailMessage());
+      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, uniqueConstraintMessage(error));
       throw error;
     }
   }
@@ -1033,6 +1070,7 @@ async function handlePost(req, res, pathname) {
       db.prepare("UPDATE admin_account_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(user.id, request.id);
       return redirect(res, "/admin/manager-requests");
     }
+    if (emailExistsForRole(request.email, request.role)) return managerRequestsPage(res, user, "此 Email 已在相同角色中使用，無法核准此申請。");
     try {
       db.exec("BEGIN");
       const newUser = db.prepare(`
@@ -1044,7 +1082,7 @@ async function handlePost(req, res, pathname) {
       return redirect(res, "/admin/manager-requests");
     } catch (error) {
       db.exec("ROLLBACK");
-      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, duplicateEmailMessage());
+      if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, uniqueConstraintMessage(error));
       throw error;
     }
   }
@@ -1177,7 +1215,7 @@ async function router(req, res) {
   } catch (error) {
     console.error(error);
     if (isUniqueConstraintError(error)) {
-      return send(res, 400, page("資料重複", `<div class="notice">${duplicateEmailMessage()}</div>`, currentUser(req)));
+      return send(res, 400, page("資料重複", `<div class="notice">${uniqueConstraintMessage(error)}</div>`, currentUser(req)));
     }
     send(res, 500, page("系統錯誤", `<div class="empty">${escapeHtml(error.message)}</div>`, currentUser(req)));
   }
@@ -1188,5 +1226,5 @@ if (!db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get()) {
 }
 
 http.createServer(router).listen(PORT, HOST, () => {
-  console.log(`卓悅研墨會員點數管理平台 running at http://${HOST}:${PORT}`);
+  console.log(`${PLATFORM_NAME} ${PLATFORM_VERSION} running at http://${HOST}:${PORT}`);
 });

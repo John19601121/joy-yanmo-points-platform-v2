@@ -1,13 +1,13 @@
 services:
   - type: web
-    name: joy-yanmo-points
+    name: lt-health-sales-points
     runtime: node
     plan: starter
     buildCommand: ""
     startCommand: "node scripts/init-db.js && node server.js"
     healthCheckPath: /healthz
     disk:
-      name: joy-yanmo-data
+      name: lt-health-sales-data
       mountPath: /var/data
       sizeGB: 1
     envVars:

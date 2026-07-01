@@ -22,9 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
   FOREIGN KEY (store_id) REFERENCES stores(id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email ON users(email, role) WHERE role = 'admin';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_email ON users(email, role) WHERE role = 'member';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_email_store ON users(email, role, store_id) WHERE role = 'store';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email ON users(lower(email), role) WHERE role = 'admin';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_member_email ON users(lower(email), role) WHERE role = 'member';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_email_store ON users(lower(email), role) WHERE role = 'store';
 
 CREATE TABLE IF NOT EXISTS members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
