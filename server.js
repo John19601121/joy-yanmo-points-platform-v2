@@ -351,7 +351,7 @@ function nav(user) {
     ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
-      : [["/member/dashboard", "會員中心"]];
+      : [["/member/dashboard", "會員中心"], ["/member/share-center", "我的成交中心"]];
   if (isSuperAdmin(user)) links.push(["/admin/audit-logs", "操作紀錄"]);
   links.push(["/account/password", "修改密碼"]);
   return `<nav>${links.map(([href, label]) => `<a href="${href}">${label}</a>`).join("")}<form method="post" action="/logout"><button>登出</button></form></nav>`;
@@ -789,6 +789,32 @@ function memberDashboard(req, res, user) {
     </div>`, user));
 }
 
+function memberShareCenter(req, res, user) {
+  const member = db.prepare("SELECT * FROM members WHERE user_id = ?").get(user.id);
+  if (!member) return send(res, 404, page("找不到會員資料", `<div class="empty">此帳號尚未連結會員資料。</div>`, user));
+  const memberCode = member.member_code || "";
+  const shareUrl = `https://tally.so/r/RGlpAl?ref=${encodeURIComponent(memberCode)}`;
+  send(res, 200, page("我的成交中心", `<div class="panel">
+    <p class="muted">分享您的專屬連結，系統將自動記錄推薦來源。</p>
+    <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
+    <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
+    <div class="actions" style="margin-top:16px"><button class="button" type="button" onclick="copyShareUrl()">複製分享網址</button><span id="copy-message" class="muted" role="status" style="align-self:center"></span></div>
+  </div>
+  <script>
+    async function copyShareUrl() {
+      const input = document.getElementById("share-url");
+      const message = document.getElementById("copy-message");
+      try {
+        await navigator.clipboard.writeText(input.value);
+      } catch (error) {
+        input.select();
+        document.execCommand("copy");
+      }
+      message.textContent = "分享網址已複製";
+    }
+  </script>`, user));
+}
+
 function adminReports(req, res, user) {
   send(res, 200, page("報表匯出中心", `<div class="panel"><h2>Excel 總報表</h2><p><a class="button" href="/admin/export/all.xlsx">下載 Excel 總報表</a></p></div>
     <div class="panel" style="margin-top:16px"><h2>CSV 匯出</h2><div class="actions">
@@ -1210,6 +1236,7 @@ async function router(req, res) {
     if (pathname === "/store/deductions") { const user = requireUser(req, res, ["store"]); if (user) return storeDeductions(req, res, user); return; }
 
     if (pathname === "/member/dashboard") { const user = requireUser(req, res, ["member"]); if (user) return memberDashboard(req, res, user); return; }
+    if (pathname === "/member/share-center") { const user = requireUser(req, res, ["member"]); if (user) return memberShareCenter(req, res, user); return; }
 
     send(res, 404, page("找不到頁面", `<div class="empty">找不到這個頁面。</div>`, currentUser(req)));
   } catch (error) {
