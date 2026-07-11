@@ -798,9 +798,21 @@ function memberShareCenter(req, res, user) {
     <p class="muted">分享您的專屬連結，系統將自動記錄推薦來源。</p>
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
     <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
-    <div class="actions" style="margin-top:16px"><button class="button" type="button" onclick="copyShareUrl()">複製分享網址</button><span id="copy-message" class="muted" role="status" style="align-self:center"></span></div>
+    <div class="actions" style="margin-top:16px">
+      <button class="button" type="button" onclick="copyShareUrl()">複製網址</button>
+      <button class="button secondary" type="button" onclick="shareToLine()">LINE 分享</button>
+      <button class="button secondary" type="button" onclick="shareToFacebook()">Facebook 分享</button>
+      <button class="button secondary" type="button" onclick="downloadQrCode()">下載 QRCode（PNG）</button>
+      <span id="copy-message" class="muted" role="status" style="align-self:center"></span>
+    </div>
+    <div style="margin-top:20px;display:grid;gap:10px;justify-items:start">
+      <canvas id="share-qrcode" width="244" height="244" style="width:244px;height:244px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px"></canvas>
+      <span class="muted">QRCode 內容：${escapeHtml(shareUrl)}</span>
+    </div>
   </div>
   <script>
+    const shareUrl = document.getElementById("share-url").value;
+
     async function copyShareUrl() {
       const input = document.getElementById("share-url");
       const message = document.getElementById("copy-message");
@@ -812,6 +824,192 @@ function memberShareCenter(req, res, user) {
       }
       message.textContent = "分享網址已複製";
     }
+
+    function shareToLine() {
+      const text = "推薦您了解 LT 大健康成交平台\\n" + shareUrl;
+      window.open("https://line.me/R/msg/text/?" + encodeURIComponent(text), "_blank", "noopener,noreferrer");
+    }
+
+    function shareToFacebook() {
+      window.open("https://www.facebook.com/sharer/sharer.php?u=" + encodeURIComponent(shareUrl), "_blank", "noopener,noreferrer");
+    }
+
+    function downloadQrCode() {
+      const link = document.createElement("a");
+      link.download = "lt-share-qrcode.png";
+      link.href = document.getElementById("share-qrcode").toDataURL("image/png");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+
+    function drawQrCode(text) {
+      const qr = createQrMatrix(text);
+      const canvas = document.getElementById("share-qrcode");
+      const ctx = canvas.getContext("2d");
+      const quiet = 4;
+      const cells = qr.length + quiet * 2;
+      const scale = Math.floor(canvas.width / cells);
+      const offset = Math.floor((canvas.width - cells * scale) / 2);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#19362f";
+      for (let y = 0; y < qr.length; y++) {
+        for (let x = 0; x < qr.length; x++) {
+          if (qr[y][x]) ctx.fillRect(offset + (x + quiet) * scale, offset + (y + quiet) * scale, scale, scale);
+        }
+      }
+    }
+
+    function createQrMatrix(text) {
+      const version = 3;
+      const size = 17 + version * 4;
+      const dataCodewords = 55;
+      const ecCodewords = 15;
+      const modules = Array.from({ length: size }, () => Array(size).fill(false));
+      const reserved = Array.from({ length: size }, () => Array(size).fill(false));
+
+      function setModule(x, y, dark, reserve = true) {
+        if (x < 0 || y < 0 || x >= size || y >= size) return;
+        modules[y][x] = dark;
+        if (reserve) reserved[y][x] = true;
+      }
+
+      function addFinder(x, y) {
+        for (let dy = -1; dy <= 7; dy++) {
+          for (let dx = -1; dx <= 7; dx++) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= size || yy >= size) continue;
+            const dark = dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6 && (dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4));
+            setModule(xx, yy, dark);
+          }
+        }
+      }
+
+      addFinder(0, 0);
+      addFinder(size - 7, 0);
+      addFinder(0, size - 7);
+      for (let i = 8; i < size - 8; i++) {
+        setModule(i, 6, i % 2 === 0);
+        setModule(6, i, i % 2 === 0);
+      }
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          setModule(22 + dx, 22 + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+        }
+      }
+      setModule(8, size - 8, true);
+      reserveFormatAreas(reserved, size);
+
+      const data = makeDataCodewords(text, dataCodewords);
+      const bytes = data.concat(reedSolomonRemainder(data, ecCodewords));
+      const bits = [];
+      for (const byte of bytes) for (let i = 7; i >= 0; i--) bits.push(((byte >>> i) & 1) === 1);
+
+      let bitIndex = 0;
+      let upward = true;
+      for (let right = size - 1; right >= 1; right -= 2) {
+        if (right === 6) right--;
+        for (let vert = 0; vert < size; vert++) {
+          const y = upward ? size - 1 - vert : vert;
+          for (let j = 0; j < 2; j++) {
+            const x = right - j;
+            if (reserved[y][x]) continue;
+            const bit = bitIndex < bits.length ? bits[bitIndex++] : false;
+            setModule(x, y, bit !== ((x + y) % 2 === 0), false);
+          }
+        }
+        upward = !upward;
+      }
+
+      drawFormatBits(modules, 0);
+      return modules;
+    }
+
+    function reserveFormatAreas(reserved, size) {
+      for (let i = 0; i < 9; i++) {
+        reserved[8][i] = true;
+        reserved[i][8] = true;
+      }
+      for (let i = 0; i < 8; i++) {
+        reserved[8][size - 1 - i] = true;
+        reserved[size - 1 - i][8] = true;
+      }
+    }
+
+    function drawFormatBits(modules, mask) {
+      const size = modules.length;
+      let data = (1 << 3) | mask;
+      let bits = data << 10;
+      for (let i = 14; i >= 10; i--) {
+        if (((bits >>> i) & 1) !== 0) bits ^= 0x537 << (i - 10);
+      }
+      bits = ((data << 10) | bits) ^ 0x5412;
+      const first = [[0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],[8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]];
+      const second = [[8,size-1],[8,size-2],[8,size-3],[8,size-4],[8,size-5],[8,size-6],[8,size-7],[8,size-8],[size-7,8],[size-6,8],[size-5,8],[size-4,8],[size-3,8],[size-2,8],[size-1,8]];
+      for (let i = 0; i < 15; i++) {
+        const dark = ((bits >>> i) & 1) !== 0;
+        modules[first[i][1]][first[i][0]] = dark;
+        modules[second[i][1]][second[i][0]] = dark;
+      }
+    }
+
+    function makeDataCodewords(text, capacity) {
+      const bytes = Array.from(new TextEncoder().encode(text));
+      if (bytes.length > 53) throw new Error("分享網址過長，無法產生 QRCode。");
+      const bits = [0,1,0,0];
+      for (let i = 7; i >= 0; i--) bits.push(((bytes.length >>> i) & 1) === 1);
+      for (const byte of bytes) for (let i = 7; i >= 0; i--) bits.push(((byte >>> i) & 1) === 1);
+      const maxBits = capacity * 8;
+      for (let i = 0; i < 4 && bits.length < maxBits; i++) bits.push(false);
+      while (bits.length % 8 !== 0) bits.push(false);
+      const result = [];
+      for (let i = 0; i < bits.length; i += 8) result.push(bits.slice(i, i + 8).reduce((value, bit) => (value << 1) | (bit ? 1 : 0), 0));
+      for (let pad = 0; result.length < capacity; pad++) result.push(pad % 2 === 0 ? 0xec : 0x11);
+      return result;
+    }
+
+    function reedSolomonRemainder(data, degree) {
+      const generator = rsGenerator(degree);
+      const result = Array(degree).fill(0);
+      for (const byte of data) {
+        const factor = byte ^ result.shift();
+        result.push(0);
+        for (let i = 0; i < degree; i++) result[i] ^= gfMultiply(generator[i], factor);
+      }
+      return result;
+    }
+
+    function rsGenerator(degree) {
+      let result = [1];
+      for (let i = 0; i < degree; i++) {
+        const next = Array(result.length + 1).fill(0);
+        for (let j = 0; j < result.length; j++) {
+          next[j] ^= gfMultiply(result[j], 1);
+          next[j + 1] ^= gfMultiply(result[j], gfPow(2, i));
+        }
+        result = next;
+      }
+      return result.slice(1);
+    }
+
+    function gfPow(x, power) {
+      let result = 1;
+      for (let i = 0; i < power; i++) result = gfMultiply(result, x);
+      return result;
+    }
+
+    function gfMultiply(x, y) {
+      let result = 0;
+      for (let i = 7; i >= 0; i--) {
+        result = (result << 1) ^ ((result >>> 7) * 0x11d);
+        if (((y >>> i) & 1) !== 0) result ^= x;
+      }
+      return result & 0xff;
+    }
+
+    drawQrCode(shareUrl);
   </script>`, user));
 }
 
