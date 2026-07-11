@@ -143,6 +143,7 @@ function runMigrations() {
   `);
   ensureSuperAdmin();
   backfillMemberCodes();
+  ensureDefaultProducts();
 }
 
 function ensureSuperAdmin() {
@@ -172,6 +173,19 @@ function backfillMemberCodes() {
     while (db.prepare("SELECT id FROM members WHERE member_code = ?").get(code)) code = generateMemberCode();
     db.prepare("UPDATE members SET member_code = ? WHERE id = ?").run(code, row.id);
   }
+}
+
+function ensureDefaultProducts() {
+  const type = db.prepare("SELECT id FROM product_types WHERE name = ?").get("用品")
+    || db.prepare("INSERT INTO product_types (name, sort_order, is_active) VALUES (?, 10, 1) RETURNING id").get("用品");
+  const category = db.prepare("SELECT id FROM product_categories WHERE type_id = ? AND name = ?").get(type.id, "清潔用品")
+    || db.prepare("INSERT INTO product_categories (type_id, name, sort_order, is_active) VALUES (?, ?, 10, 1) RETURNING id").get(type.id, "清潔用品");
+  const existing = db.prepare("SELECT id FROM products WHERE product_code = ?").get("SOAP001");
+  if (existing) return;
+  db.prepare(`
+    INSERT INTO products (product_code, name, type_id, category_id, short_description, product_page_url, price, currency, payment_provider, is_active, sort_order)
+    VALUES ('SOAP001', '烏金炭皂', ?, ?, '深層清潔、溫和調理的黑金炭皂', 'https://opx-1.my.canva.site/daho3zigbkc', NULL, 'TWD', 'ecpay', 1, 10)
+  `).run(type.id, category.id);
 }
 
 function verifyPassword(password, stored) {
@@ -222,6 +236,31 @@ function escapeHtml(value) {
 
 function money(n) {
   return Number(n || 0).toLocaleString("zh-TW");
+}
+
+function priceLabel(price, currency = "TWD") {
+  if (price === null || price === undefined || price === "") return "價格洽詢";
+  return `${currency === "TWD" ? "NT$" : `${escapeHtml(currency)} `}${money(price)}`;
+}
+
+function validHttpUrl(value, required = false) {
+  const text = String(value || "").trim();
+  if (!text) return required ? null : "";
+  try {
+    const url = new URL(text);
+    if (!["http:", "https:"].includes(url.protocol)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function parseOptionalPrice(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (!/^\d+$/.test(text)) return NaN;
+  const price = Number(text);
+  return Number.isSafeInteger(price) && price >= 0 ? price : NaN;
 }
 
 function redirect(res, location) {
@@ -348,10 +387,10 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/mall", "商城"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
-      ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
-      : [["/member/dashboard", "會員中心"], ["/member/share-center", "我的成交中心"]];
+      ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/mall", "商城"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
+      : [["/member/dashboard", "會員中心"], ["/member/mall", "商城"], ["/member/share-center", "我的成交中心"]];
   if (isSuperAdmin(user)) links.push(["/admin/audit-logs", "操作紀錄"]);
   links.push(["/account/password", "修改密碼"]);
   return `<nav>${links.map(([href, label]) => `<a href="${href}">${label}</a>`).join("")}<form method="post" action="/logout"><button>登出</button></form></nav>`;
@@ -793,9 +832,29 @@ function memberShareCenter(req, res, user) {
   const member = db.prepare("SELECT * FROM members WHERE user_id = ?").get(user.id);
   if (!member) return send(res, 404, page("找不到會員資料", `<div class="empty">此帳號尚未連結會員資料。</div>`, user));
   const memberCode = member.member_code || "";
-  const shareUrl = `https://tally.so/r/RGlpAl?ref=${encodeURIComponent(memberCode)}`;
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const productCode = String(url.searchParams.get("product") || "").trim().toUpperCase();
+  const product = productCode ? db.prepare(`
+    SELECT p.*, pt.name AS type_name, pc.name AS category_name
+    FROM products p
+    JOIN product_types pt ON pt.id = p.type_id
+    LEFT JOIN product_categories pc ON pc.id = p.category_id
+    WHERE p.product_code = ? AND p.is_active = 1
+  `).get(productCode) : null;
+  if (productCode && !product) {
+    return send(res, 404, page("找不到商品", `<div class="empty">找不到此商品，或商品尚未上架。</div><p><a class="button" href="/member/mall">返回商城</a></p>`, user));
+  }
+  const shareUrl = product
+    ? `https://tally.so/r/RGlpAl?product=${encodeURIComponent(product.product_code)}&ref=${encodeURIComponent(memberCode)}`
+    : `https://tally.so/r/RGlpAl?ref=${encodeURIComponent(memberCode)}`;
   send(res, 200, page("我的成交中心", `<div class="panel">
     <p class="muted">分享您的專屬連結，系統將自動記錄推薦來源。</p>
+    ${product ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
+      <h2 style="margin-top:0">${escapeHtml(product.name)}</h2>
+      <p class="muted">商品編號：${escapeHtml(product.product_code)}｜${escapeHtml(product.type_name)}${product.category_name ? ` → ${escapeHtml(product.category_name)}` : ""}</p>
+      <p>${escapeHtml(product.short_description || "")}</p>
+      <p><a class="button secondary" href="${escapeHtml(product.product_page_url)}" target="_blank" rel="noopener noreferrer">查看商品介紹</a></p>
+    </div>` : ""}
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
     <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
     <div class="actions" style="margin-top:16px">
@@ -862,10 +921,10 @@ function memberShareCenter(req, res, user) {
     }
 
     function createQrMatrix(text) {
-      const version = 3;
+      const version = 4;
       const size = 17 + version * 4;
-      const dataCodewords = 55;
-      const ecCodewords = 15;
+      const dataCodewords = 80;
+      const ecCodewords = 20;
       const modules = Array.from({ length: size }, () => Array(size).fill(false));
       const reserved = Array.from({ length: size }, () => Array(size).fill(false));
 
@@ -896,7 +955,7 @@ function memberShareCenter(req, res, user) {
       }
       for (let dy = -2; dy <= 2; dy++) {
         for (let dx = -2; dx <= 2; dx++) {
-          setModule(22 + dx, 22 + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+          setModule(26 + dx, 26 + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
         }
       }
       setModule(8, size - 8, true);
@@ -957,7 +1016,7 @@ function memberShareCenter(req, res, user) {
 
     function makeDataCodewords(text, capacity) {
       const bytes = Array.from(new TextEncoder().encode(text));
-      if (bytes.length > 53) throw new Error("分享網址過長，無法產生 QRCode。");
+      if (bytes.length > 78) throw new Error("分享網址過長，無法產生 QRCode。");
       const bits = [0,1,0,0];
       for (let i = 7; i >= 0; i--) bits.push(((bytes.length >>> i) & 1) === 1);
       for (const byte of bytes) for (let i = 7; i >= 0; i--) bits.push(((byte >>> i) & 1) === 1);
@@ -1011,6 +1070,140 @@ function memberShareCenter(req, res, user) {
 
     drawQrCode(shareUrl);
   </script>`, user));
+}
+
+function productRows(activeOnly = false) {
+  return db.prepare(`
+    SELECT p.*, pt.name AS type_name, pt.sort_order AS type_sort, pc.name AS category_name, pc.sort_order AS category_sort
+    FROM products p
+    JOIN product_types pt ON pt.id = p.type_id
+    LEFT JOIN product_categories pc ON pc.id = p.category_id
+    WHERE (? = 0 OR (p.is_active = 1 AND pt.is_active = 1 AND (pc.id IS NULL OR pc.is_active = 1)))
+    ORDER BY pt.sort_order, pt.id, COALESCE(pc.sort_order, 9999), COALESCE(pc.id, 0), p.sort_order, p.id
+  `).all(activeOnly ? 1 : 0);
+}
+
+function mallCatalogHtml(user, { admin = false } = {}) {
+  const rows = productRows(!admin);
+  if (!rows.length) return `<div class="empty">目前沒有上架商品。</div>`;
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.type_name)) grouped.set(row.type_name, new Map());
+    const category = row.category_name || "未分類";
+    if (!grouped.get(row.type_name).has(category)) grouped.get(row.type_name).set(category, []);
+    grouped.get(row.type_name).get(category).push(row);
+  }
+  return [...grouped.entries()].map(([typeName, categories]) => `
+    <section class="panel" style="margin-bottom:16px">
+      <h2 style="margin-top:0">${escapeHtml(typeName)}</h2>
+      ${[...categories.entries()].map(([categoryName, products]) => `
+        <div style="margin-top:14px">
+          <h3 style="margin:0 0 10px">${escapeHtml(categoryName)}</h3>
+          <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px">
+            ${products.map((product) => productCardHtml(product, user, admin)).join("")}
+          </div>
+        </div>
+      `).join("")}
+    </section>
+  `).join("");
+}
+
+function productCardHtml(product, user, admin = false) {
+  const image = product.image_url
+    ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" style="width:100%;aspect-ratio:4/3;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff">`
+    : `<div style="width:100%;aspect-ratio:4/3;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;color:var(--deep);font-weight:700">LT 商品</div>`;
+  const shareAction = user.role === "member"
+    ? `<a class="button" href="/member/share-center?product=${encodeURIComponent(product.product_code)}">取得分享工具</a>`
+    : user.role === "store"
+      ? `<span class="muted" style="align-self:center">會員登入後可取得個人分享工具</span>`
+      : "";
+  return `<article class="card" style="display:grid;gap:12px">
+    ${image}
+    <div>
+      <h3 style="margin:0 0 6px">${escapeHtml(product.name)}</h3>
+      <div class="muted">${escapeHtml(product.product_code)}｜${escapeHtml(product.type_name)}${product.category_name ? ` → ${escapeHtml(product.category_name)}` : ""}</div>
+    </div>
+    <p style="margin:0">${escapeHtml(product.short_description || "")}</p>
+    <b>${priceLabel(product.price, product.currency)}</b>
+    ${admin ? `<span class="badge">${product.is_active ? "上架" : "下架"}</span>` : ""}
+    <div class="actions">
+      <a class="button secondary" href="${escapeHtml(product.product_page_url)}" target="_blank" rel="noopener noreferrer">查看商品</a>
+      ${shareAction}
+      ${admin ? `<a class="button secondary" href="/admin/mall?edit=${encodeURIComponent(product.product_code)}">修改</a>
+        <form method="post" action="/admin/mall/products/${product.id}/toggle"><button class="button secondary">${product.is_active ? "下架" : "上架"}</button></form>` : ""}
+    </div>
+  </article>`;
+}
+
+function typeOptions(selected = "") {
+  return db.prepare("SELECT * FROM product_types ORDER BY sort_order, id").all()
+    .map((type) => `<option value="${type.id}" ${String(selected) === String(type.id) ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("");
+}
+
+function categoryOptions(selected = "", typeId = "") {
+  const rows = typeId
+    ? db.prepare("SELECT * FROM product_categories WHERE type_id = ? ORDER BY sort_order, id").all(typeId)
+    : db.prepare("SELECT pc.*, pt.name AS type_name FROM product_categories pc JOIN product_types pt ON pt.id = pc.type_id ORDER BY pt.sort_order, pt.id, pc.sort_order, pc.id").all();
+  return `<option value="">未分類</option>${rows.map((category) => `<option value="${category.id}" ${String(selected || "") === String(category.id) ? "selected" : ""}>${escapeHtml(category.type_name ? `${category.type_name} / ${category.name}` : category.name)}</option>`).join("")}`;
+}
+
+function adminMallPage(req, res, user, error = "", values = {}) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const editCode = String(url.searchParams.get("edit") || "").trim().toUpperCase();
+  const editProduct = editCode ? db.prepare("SELECT * FROM products WHERE product_code = ?").get(editCode) : null;
+  const productValues = { ...(editProduct || {}), ...values };
+  const productFormTitle = editProduct ? `修改商品：${escapeHtml(editProduct.product_code)}` : "新增商品";
+  const typeRows = db.prepare("SELECT * FROM product_types ORDER BY sort_order, id").all();
+  const categoryRows = db.prepare(`
+    SELECT pc.*, pt.name AS type_name
+    FROM product_categories pc JOIN product_types pt ON pt.id = pc.type_id
+    ORDER BY pt.sort_order, pt.id, pc.sort_order, pc.id
+  `).all();
+  send(res, 200, page("商城", `${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+    <div class="grid split">
+      <div class="panel">
+        <h2>商品類型</h2>
+        ${typeRows.length ? `<table class="table"><thead><tr><th>名稱</th><th>排序</th><th>狀態</th></tr></thead><tbody>${typeRows.map((type) => `<tr><td>${escapeHtml(type.name)}</td><td>${type.sort_order}</td><td>${type.is_active ? "啟用" : "停用"}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">尚無商品類型。</div>`}
+        <form class="stack" method="post" action="/admin/mall/types" style="margin-top:14px">
+          <div class="field"><label>新增商品類型</label><input name="name" required></div>
+          <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="0"></div>
+          <button class="button">新增類型</button>
+        </form>
+      </div>
+      <div class="panel">
+        <h2>商品分類</h2>
+        ${categoryRows.length ? `<table class="table"><thead><tr><th>類型</th><th>分類</th><th>排序</th><th>狀態</th></tr></thead><tbody>${categoryRows.map((category) => `<tr><td>${escapeHtml(category.type_name)}</td><td>${escapeHtml(category.name)}</td><td>${category.sort_order}</td><td>${category.is_active ? "啟用" : "停用"}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">尚無商品分類。</div>`}
+        <form class="stack" method="post" action="/admin/mall/categories" style="margin-top:14px">
+          <div class="field"><label>商品類型</label><select name="type_id" required>${typeOptions()}</select></div>
+          <div class="field"><label>新增商品分類</label><input name="name" required></div>
+          <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="0"></div>
+          <button class="button">新增分類</button>
+        </form>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>${productFormTitle}</h2>
+      <form class="stack" method="post" action="/admin/mall/products">
+        <input type="hidden" name="id" value="${escapeHtml(productValues.id || "")}">
+        <div class="field"><label>商品編號</label><input name="product_code" value="${escapeHtml(productValues.product_code || "")}" required></div>
+        <div class="field"><label>商品名稱</label><input name="name" value="${escapeHtml(productValues.name || "")}" required></div>
+        <div class="field"><label>商品類型</label><select name="type_id" required>${typeOptions(productValues.type_id)}</select></div>
+        <div class="field"><label>商品分類</label><select name="category_id">${categoryOptions(productValues.category_id)}</select></div>
+        <div class="field"><label>簡短介紹</label><textarea name="short_description">${escapeHtml(productValues.short_description || "")}</textarea></div>
+        <div class="field"><label>商品圖片網址</label><input name="image_url" value="${escapeHtml(productValues.image_url || "")}" placeholder="https://"></div>
+        <div class="field"><label>商品介紹網址</label><input name="product_page_url" value="${escapeHtml(productValues.product_page_url || "")}" placeholder="https://" required></div>
+        <div class="field"><label>價格</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"></div>
+        <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="${productValues.sort_order ?? 0}"></div>
+        <label class="actions" style="align-items:center"><input name="is_active" type="checkbox" value="1" ${String(productValues.is_active ?? 1) === "1" ? "checked" : ""}> 是否上架</label>
+        <button class="button">${editProduct ? "儲存商品" : "新增商品"}</button>
+      </form>
+    </div>
+    <div style="margin-top:16px">${mallCatalogHtml(user, { admin: true })}</div>`, user));
+}
+
+function mallPage(res, user) {
+  const title = user.role === "admin" ? "商城" : "商城";
+  send(res, 200, page(title, mallCatalogHtml(user), user));
 }
 
 function adminReports(req, res, user) {
@@ -1203,6 +1396,90 @@ async function handlePost(req, res, pathname) {
       Location: `${loginPathForRole(user.role)}?passwordChanged=1`
     });
     return res.end();
+  }
+  if (pathname === "/admin/mall/types") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const name = String(body.name || "").trim();
+    const sortOrder = Number(body.sort_order || 0);
+    if (!name) return adminMallPage(req, res, user, "請輸入商品類型名稱。");
+    if (!Number.isInteger(sortOrder)) return adminMallPage(req, res, user, "商品類型排序必須是整數。");
+    try {
+      db.prepare("INSERT INTO product_types (name, sort_order, is_active) VALUES (?, ?, 1)").run(name, sortOrder);
+      return redirect(res, "/admin/mall");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return adminMallPage(req, res, user, "此商品類型已存在。");
+      throw error;
+    }
+  }
+  if (pathname === "/admin/mall/categories") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const typeId = Number(body.type_id);
+    const name = String(body.name || "").trim();
+    const sortOrder = Number(body.sort_order || 0);
+    if (!db.prepare("SELECT id FROM product_types WHERE id = ?").get(typeId)) return adminMallPage(req, res, user, "請選擇有效的商品類型。");
+    if (!name) return adminMallPage(req, res, user, "請輸入商品分類名稱。");
+    if (!Number.isInteger(sortOrder)) return adminMallPage(req, res, user, "商品分類排序必須是整數。");
+    try {
+      db.prepare("INSERT INTO product_categories (type_id, name, sort_order, is_active) VALUES (?, ?, ?, 1)").run(typeId, name, sortOrder);
+      return redirect(res, "/admin/mall");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return adminMallPage(req, res, user, "此商品分類已存在。");
+      throw error;
+    }
+  }
+  if (pathname === "/admin/mall/products") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const id = body.id ? Number(body.id) : null;
+    const productCode = String(body.product_code || "").trim().toUpperCase();
+    const name = String(body.name || "").trim();
+    const typeId = Number(body.type_id);
+    const categoryId = body.category_id ? Number(body.category_id) : null;
+    const shortDescription = String(body.short_description || "").trim();
+    const imageUrl = validHttpUrl(body.image_url, false);
+    const productPageUrl = validHttpUrl(body.product_page_url, true);
+    const price = parseOptionalPrice(body.price);
+    const sortOrder = Number(body.sort_order || 0);
+    const isActive = body.is_active === "1" ? 1 : 0;
+    const values = { ...body, id, product_code: productCode, type_id: typeId, category_id: categoryId, price, sort_order: sortOrder, is_active: isActive };
+    if (!/^[A-Z0-9_-]{2,40}$/.test(productCode)) return adminMallPage(req, res, user, "商品編號只能使用英文、數字、底線或連字號。", values);
+    if (!name) return adminMallPage(req, res, user, "請輸入商品名稱。", values);
+    if (!db.prepare("SELECT id FROM product_types WHERE id = ?").get(typeId)) return adminMallPage(req, res, user, "請選擇有效的商品類型。", values);
+    if (categoryId && !db.prepare("SELECT id FROM product_categories WHERE id = ? AND type_id = ?").get(categoryId, typeId)) return adminMallPage(req, res, user, "商品分類必須屬於所選商品類型。", values);
+    if (imageUrl === null) return adminMallPage(req, res, user, "商品圖片網址必須是 http 或 https。", values);
+    if (!productPageUrl) return adminMallPage(req, res, user, "商品介紹網址必須是 http 或 https。", values);
+    if (Number.isNaN(price)) return adminMallPage(req, res, user, "價格必須是 0 或正整數，或留空顯示價格洽詢。", values);
+    if (!Number.isInteger(sortOrder)) return adminMallPage(req, res, user, "顯示順序必須是整數。", values);
+    try {
+      if (id) {
+        const existing = db.prepare("SELECT id FROM products WHERE id = ?").get(id);
+        if (!existing) return adminMallPage(req, res, user, "找不到要修改的商品。", values);
+        db.prepare(`
+          UPDATE products
+          SET product_code = ?, name = ?, type_id = ?, category_id = ?, short_description = ?, image_url = ?,
+              product_page_url = ?, price = ?, currency = 'TWD', payment_provider = 'ecpay',
+              is_active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(productCode, name, typeId, categoryId, shortDescription, imageUrl || "", productPageUrl, price, isActive, sortOrder, id);
+      } else {
+        db.prepare(`
+          INSERT INTO products (product_code, name, type_id, category_id, short_description, image_url, product_page_url, price, currency, payment_provider, is_active, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'TWD', 'ecpay', ?, ?)
+        `).run(productCode, name, typeId, categoryId, shortDescription, imageUrl || "", productPageUrl, price, isActive, sortOrder);
+      }
+      return redirect(res, "/admin/mall");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return adminMallPage(req, res, user, "此商品編號已存在。", values);
+      throw error;
+    }
+  }
+  const productToggleMatch = pathname.match(/^\/admin\/mall\/products\/(\d+)\/toggle$/);
+  if (productToggleMatch) {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const product = db.prepare("SELECT id, is_active FROM products WHERE id = ?").get(productToggleMatch[1]);
+    if (product) {
+      db.prepare("UPDATE products SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(product.is_active ? 0 : 1, product.id);
+    }
+    return redirect(res, "/admin/mall");
   }
   if (pathname === "/admin/stores") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
@@ -1413,6 +1690,7 @@ async function router(req, res) {
     }
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
+    if (pathname === "/admin/mall") { const user = requireUser(req, res, ["admin"]); if (user) return adminMallPage(req, res, user); return; }
     if (pathname === "/admin/reports") { const user = requireUser(req, res, ["admin"]); if (user) return adminReports(req, res, user); return; }
     if (pathname === "/admin/manager-requests") { const user = requireUser(req, res, ["admin"]); if (user) return managerRequestsPage(res, user); return; }
     if (pathname === "/admin/audit-logs") { const user = requireUser(req, res, ["admin"]); if (user) return adminAuditPage(res, user); return; }
@@ -1424,6 +1702,7 @@ async function router(req, res) {
     if (adminView) { const user = requireUser(req, res, ["admin"]); if (user) return renderStoreDashboard(res, user, adminView[1], true); return; }
 
     if (pathname === "/store/dashboard") { const user = requireUser(req, res, ["store"]); if (user) return renderStoreDashboard(res, user, user.store_id); return; }
+    if (pathname === "/store/mall") { const user = requireUser(req, res, ["store"]); if (user) return mallPage(res, user); return; }
     if (pathname === "/store/reports") { const user = requireUser(req, res, ["store"]); if (user) return storeReports(req, res, user); return; }
     if (pathname === "/store/cross-store") { const user = requireUser(req, res, ["store"]); if (user) return crossStorePage(req, res, user, url.searchParams.get("q") || ""); return; }
     if (pathname === "/store/manager-requests") { const user = requireUser(req, res, ["store"]); if (user) return managerRequestsPage(res, user); return; }
@@ -1434,6 +1713,7 @@ async function router(req, res) {
     if (pathname === "/store/deductions") { const user = requireUser(req, res, ["store"]); if (user) return storeDeductions(req, res, user); return; }
 
     if (pathname === "/member/dashboard") { const user = requireUser(req, res, ["member"]); if (user) return memberDashboard(req, res, user); return; }
+    if (pathname === "/member/mall") { const user = requireUser(req, res, ["member"]); if (user) return mallPage(res, user); return; }
     if (pathname === "/member/share-center") { const user = requireUser(req, res, ["member"]); if (user) return memberShareCenter(req, res, user); return; }
 
     send(res, 404, page("找不到頁面", `<div class="empty">找不到這個頁面。</div>`, currentUser(req)));
