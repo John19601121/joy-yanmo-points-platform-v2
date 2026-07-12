@@ -1109,9 +1109,10 @@ function mallCatalogHtml(user, { admin = false } = {}) {
 }
 
 function productCardHtml(product, user, admin = false) {
+  const fallbackImage = `<div style="position:absolute;inset:0;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;color:var(--deep);font-weight:700">LT 商品</div>`;
   const image = product.image_url
-    ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" style="width:100%;aspect-ratio:4/3;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff">`
-    : `<div style="width:100%;aspect-ratio:4/3;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;color:var(--deep);font-weight:700">LT 商品</div>`;
+    ? `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" onerror="this.hidden=true" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff"></div>`
+    : `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}</div>`;
   const shareAction = user.role === "member"
     ? `<a class="button" href="/member/share-center?product=${encodeURIComponent(product.product_code)}">取得分享工具</a>`
     : user.role === "store"
@@ -1190,7 +1191,7 @@ function adminMallPage(req, res, user, error = "", values = {}) {
         <div class="field"><label>商品類型</label><select name="type_id" required>${typeOptions(productValues.type_id)}</select></div>
         <div class="field"><label>商品分類</label><select name="category_id">${categoryOptions(productValues.category_id)}</select></div>
         <div class="field"><label>簡短介紹</label><textarea name="short_description">${escapeHtml(productValues.short_description || "")}</textarea></div>
-        <div class="field"><label>商品圖片網址</label><input name="image_url" value="${escapeHtml(productValues.image_url || "")}" placeholder="https://"></div>
+        <div class="field"><label>商品圖片網址</label><input name="image_url" value="${escapeHtml(productValues.image_url || "")}" placeholder="https://"><span class="muted">請填入可直接顯示的 JPG、PNG 或 WebP 圖片網址，不可填入一般網頁或 Canva 頁面網址。</span></div>
         <div class="field"><label>商品介紹網址</label><input name="product_page_url" value="${escapeHtml(productValues.product_page_url || "")}" placeholder="https://" required></div>
         <div class="field"><label>價格</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"></div>
         <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="${productValues.sort_order ?? 0}"></div>
