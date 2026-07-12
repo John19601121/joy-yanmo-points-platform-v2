@@ -1109,7 +1109,7 @@ function mallCatalogHtml(user, { admin = false } = {}) {
 }
 
 function productCardHtml(product, user, admin = false) {
-  const fallbackImage = `<div style="position:absolute;inset:0;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;color:var(--deep);font-weight:700">LT 商品</div>`;
+  const fallbackImage = `<div style="position:absolute;inset:0;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;text-align:center;color:var(--deep);padding:18px"><div><b style="display:block;font-size:18px;margin-bottom:8px">LT 商品</b><strong style="display:block;font-size:20px;line-height:1.35">${escapeHtml(product.name)}</strong><span class="muted" style="display:block;margin-top:8px">${escapeHtml(product.product_code)}</span><span class="badge" style="margin-top:12px">圖片待補</span></div></div>`;
   const image = product.image_url
     ? `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" onerror="this.hidden=true" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff"></div>`
     : `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}</div>`;
