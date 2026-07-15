@@ -12,6 +12,7 @@ const HOST = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0
 const DB_PATH = path.resolve(ROOT, process.env.DATABASE_PATH || "data/app.sqlite");
 const SCHEMA_PATH = path.join(ROOT, "schema.sql");
 const PUBLIC_DIR = path.join(ROOT, "public");
+const PUBLIC_IMAGES_DIR = path.join(PUBLIC_DIR, "images");
 const PLATFORM_NAME = "LT 大健康成交會員積分管理平台";
 const PLATFORM_VERSION = "V1.0 正式版";
 const EXPORT_PREFIX = "lt-health-sales-points";
@@ -1667,12 +1668,44 @@ function serveStatic(res, pathname) {
   return true;
 }
 
+function imageContentType(file) {
+  const ext = path.extname(file).toLowerCase();
+  return {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif"
+  }[ext] || "";
+}
+
+function servePublicImage(res, pathname) {
+  let rel = "";
+  try {
+    rel = decodeURIComponent(pathname.replace(/^\/images\//, ""));
+  } catch {
+    return false;
+  }
+  if (!rel || rel.includes("\0")) return false;
+  const file = path.resolve(PUBLIC_IMAGES_DIR, rel);
+  if (!file.startsWith(`${PUBLIC_IMAGES_DIR}${path.sep}`)) return false;
+  const type = imageContentType(file);
+  if (!type || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  res.writeHead(200, { "Content-Type": type, "Cache-Control": "public, max-age=3600" });
+  fs.createReadStream(file).pipe(res);
+  return true;
+}
+
 async function router(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const pathname = url.pathname.replace(/\/+$/, "") || "/";
     if (pathname === "/healthz") return sendText(res, 200, "ok");
     if (pathname.startsWith("/public/") && serveStatic(res, pathname)) return;
+    if (pathname.startsWith("/images/")) {
+      if (servePublicImage(res, pathname)) return;
+      return sendText(res, 404, "Not found");
+    }
     if (req.method === "GET" && handleExport(req, res, pathname)) return;
     if (req.method === "POST") return handlePost(req, res, pathname);
 
