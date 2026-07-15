@@ -3,6 +3,8 @@ FROM node:24-slim
 WORKDIR /app
 
 COPY package.json ./
+RUN npm install --omit=dev
+
 COPY schema.sql server.js ./
 COPY scripts ./scripts
 COPY public ./public

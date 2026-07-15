@@ -3,7 +3,7 @@ services:
     name: lt-health-sales-points
     runtime: node
     plan: starter
-    buildCommand: ""
+    buildCommand: "npm install"
     startCommand: "node scripts/init-db.js && node server.js"
     healthCheckPath: /healthz
     disk:
