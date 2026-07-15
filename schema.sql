@@ -123,6 +123,26 @@ CREATE TABLE IF NOT EXISTS product_categories (
   UNIQUE (type_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS media_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL DEFAULT 'cloudinary',
+  public_id TEXT NOT NULL UNIQUE,
+  secure_url TEXT NOT NULL,
+  original_filename TEXT,
+  display_name TEXT,
+  alt_text TEXT,
+  mime_type TEXT,
+  file_size INTEGER,
+  width INTEGER,
+  height INTEGER,
+  folder TEXT,
+  uploaded_by_user_id INTEGER,
+  is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (uploaded_by_user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code TEXT NOT NULL UNIQUE,
@@ -130,6 +150,7 @@ CREATE TABLE IF NOT EXISTS products (
   type_id INTEGER NOT NULL,
   category_id INTEGER,
   short_description TEXT,
+  media_asset_id INTEGER,
   image_url TEXT,
   product_page_url TEXT NOT NULL,
   price INTEGER,
@@ -140,5 +161,6 @@ CREATE TABLE IF NOT EXISTS products (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (type_id) REFERENCES product_types(id),
-  FOREIGN KEY (category_id) REFERENCES product_categories(id)
+  FOREIGN KEY (category_id) REFERENCES product_categories(id),
+  FOREIGN KEY (media_asset_id) REFERENCES media_assets(id)
 );

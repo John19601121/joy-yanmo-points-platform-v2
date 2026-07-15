@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
+const { v2: cloudinary } = require("cloudinary");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -21,6 +22,20 @@ const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_E
 const SUPER_ADMIN_EMAIL = "luodayu168@gmail.com";
 const SUPER_ADMIN_INITIAL_PASSWORD = "QazxsW12345";
 const DEFAULT_MANAGER_PASSWORD = "password123";
+const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "lt-health-products";
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 256 * 1024;
+const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+
+if (isCloudinaryConfigured()) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true
+  });
+}
 
 if (process.env.NODE_ENV === "production" && SESSION_SECRET === "dev-change-me-lt-health-sales") {
   throw new Error("Production requires SESSION_SECRET.");
@@ -95,6 +110,7 @@ function runMigrations() {
   if (!columnExists("users", "status")) db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';");
   if (!columnExists("users", "is_super_admin")) db.exec("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0;");
   if (!columnExists("members", "member_code")) db.exec("ALTER TABLE members ADD COLUMN member_code TEXT;");
+  if (!columnExists("products", "media_asset_id")) db.exec("ALTER TABLE products ADD COLUMN media_asset_id INTEGER;");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_members_member_code ON members(member_code);");
   db.exec("DROP INDEX IF EXISTS idx_users_admin_email;");
   db.exec("DROP INDEX IF EXISTS idx_users_member_email;");
@@ -256,6 +272,39 @@ function validHttpUrl(value, required = false) {
   }
 }
 
+function isCloudinaryConfigured() {
+  return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+}
+
+function formatBytes(bytes = 0) {
+  const size = Number(bytes || 0);
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
+  return `${size} B`;
+}
+
+function cloudinaryOptimizedUrl(url, size = 800) {
+  const text = String(url || "");
+  if (!text.includes("res.cloudinary.com/") || !text.includes("/upload/")) return text;
+  return text.replace("/upload/", `/upload/f_auto,q_auto,c_fill,w_${size},h_${size}/`);
+}
+
+function mediaAssets(limit = 24) {
+  return db.prepare(`
+    SELECT ma.*, u.name AS uploaded_by_name
+    FROM media_assets ma
+    LEFT JOIN users u ON u.id = ma.uploaded_by_user_id
+    WHERE ma.is_active = 1
+    ORDER BY ma.id DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+function mediaAssetById(id) {
+  if (!id) return null;
+  return db.prepare("SELECT * FROM media_assets WHERE id = ? AND is_active = 1").get(id) || null;
+}
+
 function parseOptionalPrice(value) {
   const text = String(value || "").trim();
   if (!text) return null;
@@ -327,6 +376,106 @@ function readBody(req) {
   });
 }
 
+function bufferSplit(buffer, separator) {
+  const parts = [];
+  let start = 0;
+  let index = buffer.indexOf(separator, start);
+  while (index !== -1) {
+    parts.push(buffer.subarray(start, index));
+    start = index + separator.length;
+    index = buffer.indexOf(separator, start);
+  }
+  parts.push(buffer.subarray(start));
+  return parts;
+}
+
+function readMultipartBody(req, maxBytes = MAX_MULTIPART_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        tooLarge = true;
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (tooLarge) reject(new Error("檔案大小超過 5 MB。"));
+      else resolve(Buffer.concat(chunks));
+    });
+    req.on("error", reject);
+  });
+}
+
+async function parseMultipartForm(req) {
+  const contentType = String(req.headers["content-type"] || "");
+  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!match) throw new Error("上傳格式不正確。");
+  const boundary = Buffer.from(`--${match[1] || match[2]}`);
+  const body = await readMultipartBody(req);
+  const fields = {};
+  const files = {};
+  for (let part of bufferSplit(body, boundary)) {
+    if (part.length < 4 || part.equals(Buffer.from("--\r\n")) || part.equals(Buffer.from("--"))) continue;
+    if (part.subarray(0, 2).toString() === "\r\n") part = part.subarray(2);
+    if (part.subarray(-2).toString() === "\r\n") part = part.subarray(0, -2);
+    if (part.subarray(-2).toString() === "--") part = part.subarray(0, -2);
+    const divider = part.indexOf(Buffer.from("\r\n\r\n"));
+    if (divider === -1) continue;
+    const rawHeaders = part.subarray(0, divider).toString("utf8");
+    const data = part.subarray(divider + 4);
+    const disposition = rawHeaders.match(/content-disposition:\s*form-data;([^\r\n]+)/i)?.[1] || "";
+    const name = disposition.match(/name="([^"]+)"/i)?.[1];
+    if (!name) continue;
+    const filename = disposition.match(/filename="([^"]*)"/i)?.[1];
+    const mimeType = rawHeaders.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() || "";
+    if (filename !== undefined) {
+      files[name] = { filename: path.basename(filename), mimeType, data };
+    } else {
+      fields[name] = data.toString("utf8");
+    }
+  }
+  return { fields, files };
+}
+
+function sniffImageMime(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "";
+}
+
+function validateImageUpload(file) {
+  if (!file || !file.data?.length) throw new Error("請選擇要上傳的圖片。");
+  if (file.data.length > MAX_IMAGE_BYTES) throw new Error("單張圖片不可超過 5 MB。");
+  const ext = path.extname(file.filename || "").toLowerCase();
+  if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) throw new Error("僅支援 JPG、PNG、WebP 圖片。");
+  if (!ALLOWED_IMAGE_MIME_TYPES.has(file.mimeType)) throw new Error("圖片 Content-Type 不支援。");
+  const sniffed = sniffImageMime(file.data);
+  if (!sniffed || sniffed !== file.mimeType) throw new Error("檔案內容不是有效的 JPG、PNG 或 WebP 圖片。");
+  return sniffed;
+}
+
+function uploadToCloudinary(file, mimeType) {
+  return new Promise((resolve, reject) => {
+    const upload = cloudinary.uploader.upload_stream({
+      resource_type: "image",
+      folder: CLOUDINARY_FOLDER,
+      use_filename: true,
+      unique_filename: true,
+      overwrite: false,
+      context: { original_filename: file.filename || "" }
+    }, (error, result) => {
+      if (error) reject(error);
+      else resolve({ ...result, mime_type: mimeType });
+    });
+    upload.end(file.data);
+  });
+}
+
 function currentUser(req) {
   return parseToken(parseCookies(req.headers.cookie).session);
 }
@@ -388,7 +537,7 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/mall", "商城"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/mall", "商城"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/mall", "商城"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
       : [["/member/dashboard", "會員中心"], ["/member/mall", "商城"], ["/member/share-center", "我的成交中心"]];
@@ -1073,10 +1222,77 @@ function memberShareCenter(req, res, user) {
   </script>`, user));
 }
 
+function mediaCardHtml(asset, { selectable = false } = {}) {
+  const title = asset.display_name || asset.original_filename || `媒體 #${asset.id}`;
+  return `<article class="card" style="display:grid;gap:10px">
+    <div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px;background:var(--jade);border:1px solid var(--line)">
+      <img src="${escapeHtml(cloudinaryOptimizedUrl(asset.secure_url, 420))}" alt="${escapeHtml(asset.alt_text || title)}" loading="lazy" onerror="this.hidden=true" style="width:100%;height:100%;object-fit:cover">
+    </div>
+    <div>
+      <b>${escapeHtml(title)}</b>
+      <div class="muted" style="font-size:13px">${escapeHtml(asset.original_filename || "")}</div>
+      <div class="muted" style="font-size:13px">${asset.width || "-"} × ${asset.height || "-"}｜${formatBytes(asset.file_size)}</div>
+      <div class="muted" style="font-size:13px">${escapeHtml(asset.created_at || "")}</div>
+    </div>
+    <div class="actions">
+      <button class="button secondary" type="button" data-copy-url="${escapeHtml(asset.secure_url)}">複製圖片網址</button>
+      ${selectable ? `<a class="button" href="/admin/mall?media=${asset.id}">套用到商品</a>` : ""}
+    </div>
+  </article>`;
+}
+
+function mediaLibraryHtml({ selectable = false, limit = 24 } = {}) {
+  const assets = mediaAssets(limit);
+  if (!assets.length) return `<div class="empty">尚未上傳圖片。</div>`;
+  return `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">${assets.map((asset) => mediaCardHtml(asset, { selectable })).join("")}</div>
+    <script>
+      document.querySelectorAll("[data-copy-url]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(button.dataset.copyUrl);
+            button.textContent = "已複製";
+          } catch {
+            button.textContent = "請手動複製";
+          }
+        });
+      });
+    </script>`;
+}
+
+function adminMediaPage(req, res, user, message = "") {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const notice = message || url.searchParams.get("message") || "";
+  const configured = isCloudinaryConfigured();
+  send(res, 200, page("媒體中心", `${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+    ${configured ? "" : `<div class="notice">媒體上傳尚未設定。請在 Render Environment 設定 Cloudinary 環境變數後再上傳圖片。</div>`}
+    <div class="grid split">
+      <section class="panel">
+        <h2>上傳圖片</h2>
+        <form class="stack" method="post" action="/admin/media/upload" enctype="multipart/form-data">
+          <div class="field"><label>選擇圖片</label><input name="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" required></div>
+          <div class="field"><label>圖片名稱</label><input name="display_name" placeholder="可選填"></div>
+          <div class="field"><label>替代文字 alt text</label><input name="alt_text" placeholder="可選填"></div>
+          <span class="muted">支援 JPG、PNG、WebP，單張圖片 5 MB 以下；建議使用 1200 × 1200 px。</span>
+          <button class="button" ${configured ? "" : "disabled"}>上傳圖片</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>資料庫變更摘要</h2>
+        <p class="muted">新增 media_assets 保存 Cloudinary 圖片資料；products 保留 image_url，另新增可為空的 media_asset_id。</p>
+      </section>
+    </div>
+    <section class="panel" style="margin-top:16px">
+      <h2>媒體庫</h2>
+      ${mediaLibraryHtml({ selectable: true, limit: 60 })}
+    </section>`, user));
+}
+
 function productRows(activeOnly = false) {
   return db.prepare(`
-    SELECT p.*, pt.name AS type_name, pt.sort_order AS type_sort, pc.name AS category_name, pc.sort_order AS category_sort
+    SELECT p.*, ma.secure_url AS media_secure_url, ma.alt_text AS media_alt_text,
+      pt.name AS type_name, pt.sort_order AS type_sort, pc.name AS category_name, pc.sort_order AS category_sort
     FROM products p
+    LEFT JOIN media_assets ma ON ma.id = p.media_asset_id AND ma.is_active = 1
     JOIN product_types pt ON pt.id = p.type_id
     LEFT JOIN product_categories pc ON pc.id = p.category_id
     WHERE (? = 0 OR (p.is_active = 1 AND pt.is_active = 1 AND (pc.id IS NULL OR pc.is_active = 1)))
@@ -1111,8 +1327,9 @@ function mallCatalogHtml(user, { admin = false } = {}) {
 
 function productCardHtml(product, user, admin = false) {
   const fallbackImage = `<div style="position:absolute;inset:0;border:1px solid var(--line);border-radius:8px;background:var(--jade);display:flex;align-items:center;justify-content:center;text-align:center;color:var(--deep);padding:18px"><div><b style="display:block;font-size:18px;margin-bottom:8px">LT 商品</b><strong style="display:block;font-size:20px;line-height:1.35">${escapeHtml(product.name)}</strong><span class="muted" style="display:block;margin-top:8px">${escapeHtml(product.product_code)}</span><span class="badge" style="margin-top:12px">圖片待補</span></div></div>`;
-  const image = product.image_url
-    ? `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" onerror="this.hidden=true" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff"></div>`
+  const imageUrl = product.media_secure_url || product.image_url || "";
+  const image = imageUrl
+    ? `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}<img src="${escapeHtml(cloudinaryOptimizedUrl(imageUrl))}" alt="${escapeHtml(product.media_alt_text || product.name)}" onerror="this.hidden=true" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#fff"></div>`
     : `<div style="position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:8px">${fallbackImage}</div>`;
   const shareAction = user.role === "member"
     ? `<a class="button" href="/member/share-center?product=${encodeURIComponent(product.product_code)}">取得分享工具</a>`
@@ -1149,11 +1366,60 @@ function categoryOptions(selected = "", typeId = "") {
   return `<option value="">未分類</option>${rows.map((category) => `<option value="${category.id}" ${String(selected || "") === String(category.id) ? "selected" : ""}>${escapeHtml(category.type_name ? `${category.type_name} / ${category.name}` : category.name)}</option>`).join("")}`;
 }
 
+function productMediaPickerHtml(productValues) {
+  const selectedId = String(productValues.media_asset_id || "");
+  const assets = mediaAssets(12);
+  const cards = assets.length ? assets.map((asset) => {
+    const checked = selectedId && selectedId === String(asset.id);
+    const title = asset.display_name || asset.original_filename || `媒體 #${asset.id}`;
+    return `<label class="card" style="display:grid;gap:8px;padding:10px;cursor:pointer">
+      <input type="radio" name="media_asset_id" value="${asset.id}" data-media-url="${escapeHtml(asset.secure_url)}" ${checked ? "checked" : ""}>
+      <img src="${escapeHtml(cloudinaryOptimizedUrl(asset.secure_url, 240))}" alt="${escapeHtml(asset.alt_text || title)}" style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+      <span style="font-weight:700">${escapeHtml(title)}</span>
+    </label>`;
+  }).join("") : `<div class="empty">媒體中心尚未有圖片。</div>`;
+  return `<div class="field">
+    <label>從媒體中心選擇</label>
+    <label class="actions" style="align-items:center"><input type="radio" name="media_asset_id" value="" ${selectedId ? "" : "checked"}> 使用下方商品圖片網址</label>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">${cards}</div>
+    <a class="button secondary" href="/admin/media">前往媒體中心</a>
+  </div>
+  <script>
+    document.querySelectorAll("input[name='media_asset_id'][data-media-url]").forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const input = document.querySelector("input[name='image_url']");
+        if (radio.checked && input) input.value = radio.dataset.mediaUrl;
+      });
+    });
+  </script>`;
+}
+
+function productDirectUploadHtml(editProduct, selectedMediaId = "") {
+  const configured = isCloudinaryConfigured();
+  return `<section class="panel" style="margin-top:16px">
+    <h2>直接上傳新圖片</h2>
+    ${configured ? "" : `<div class="notice">媒體上傳尚未設定。請先在 Render Environment 設定 Cloudinary 環境變數。</div>`}
+    <form class="stack" method="post" action="/admin/media/upload" enctype="multipart/form-data">
+      <input type="hidden" name="context" value="mall">
+      <input type="hidden" name="product_id" value="${escapeHtml(editProduct?.id || "")}">
+      <input type="hidden" name="return_edit" value="${escapeHtml(editProduct?.product_code || "")}">
+      <input type="hidden" name="selected_media_id" value="${escapeHtml(selectedMediaId || "")}">
+      <div class="field"><label>選擇圖片</label><input name="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" required></div>
+      <div class="field"><label>圖片名稱</label><input name="display_name" value="${escapeHtml(editProduct?.name || "")}" placeholder="可選填"></div>
+      <div class="field"><label>替代文字 alt text</label><input name="alt_text" value="${escapeHtml(editProduct?.name || "")}" placeholder="可選填"></div>
+      <span class="muted">支援 JPG、PNG、WebP，單張圖片 5 MB 以下；建議使用 1200 × 1200 px。</span>
+      <button class="button" ${configured ? "" : "disabled"}>${editProduct ? "上傳並套用到此商品" : "上傳並帶回商品表單"}</button>
+    </form>
+  </section>`;
+}
+
 function adminMallPage(req, res, user, error = "", values = {}) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const editCode = String(url.searchParams.get("edit") || "").trim().toUpperCase();
   const editProduct = editCode ? db.prepare("SELECT * FROM products WHERE product_code = ?").get(editCode) : null;
-  const productValues = { ...(editProduct || {}), ...values };
+  const selectedMedia = mediaAssetById(url.searchParams.get("media"));
+  const productValues = { ...(editProduct || {}), ...(selectedMedia ? { media_asset_id: selectedMedia.id, image_url: selectedMedia.secure_url } : {}), ...values };
+  const notice = error || url.searchParams.get("message") || "";
   const productFormTitle = editProduct ? `修改商品：${escapeHtml(editProduct.product_code)}` : "新增商品";
   const typeRows = db.prepare("SELECT * FROM product_types ORDER BY sort_order, id").all();
   const categoryRows = db.prepare(`
@@ -1161,7 +1427,7 @@ function adminMallPage(req, res, user, error = "", values = {}) {
     FROM product_categories pc JOIN product_types pt ON pt.id = pc.type_id
     ORDER BY pt.sort_order, pt.id, pc.sort_order, pc.id
   `).all();
-  send(res, 200, page("商城", `${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+  send(res, 200, page("商城", `${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
     <div class="grid split">
       <div class="panel">
         <h2>商品類型</h2>
@@ -1193,6 +1459,7 @@ function adminMallPage(req, res, user, error = "", values = {}) {
         <div class="field"><label>商品分類</label><select name="category_id">${categoryOptions(productValues.category_id)}</select></div>
         <div class="field"><label>簡短介紹</label><textarea name="short_description">${escapeHtml(productValues.short_description || "")}</textarea></div>
         <div class="field"><label>商品圖片網址</label><input name="image_url" value="${escapeHtml(productValues.image_url || "")}" placeholder="https://"><span class="muted">請填入可直接顯示的 JPG、PNG 或 WebP 圖片網址，不可填入一般網頁或 Canva 頁面網址。</span></div>
+        ${productMediaPickerHtml(productValues)}
         <div class="field"><label>商品介紹網址</label><input name="product_page_url" value="${escapeHtml(productValues.product_page_url || "")}" placeholder="https://" required></div>
         <div class="field"><label>價格</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"></div>
         <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="${productValues.sort_order ?? 0}"></div>
@@ -1200,6 +1467,7 @@ function adminMallPage(req, res, user, error = "", values = {}) {
         <button class="button">${editProduct ? "儲存商品" : "新增商品"}</button>
       </form>
     </div>
+    ${productDirectUploadHtml(editProduct, productValues.media_asset_id)}
     <div style="margin-top:16px">${mallCatalogHtml(user, { admin: true })}</div>`, user));
 }
 
@@ -1337,7 +1605,66 @@ function handleExport(req, res, pathname) {
   return false;
 }
 
+async function handleMediaUpload(req, res) {
+  const user = requireUser(req, res, ["admin"]);
+  if (!user) return;
+  let form;
+  try {
+    form = await parseMultipartForm(req);
+    if (!isCloudinaryConfigured()) throw new Error("媒體上傳尚未設定。");
+    const file = form.files.image;
+    const mimeType = validateImageUpload(file);
+    const result = await uploadToCloudinary(file, mimeType);
+    const displayName = String(form.fields.display_name || "").trim().slice(0, 120);
+    const altText = String(form.fields.alt_text || "").trim().slice(0, 180);
+    let asset;
+    try {
+      asset = db.prepare(`
+        INSERT INTO media_assets (
+          provider, public_id, secure_url, original_filename, display_name, alt_text,
+          mime_type, file_size, width, height, folder, uploaded_by_user_id, is_active
+        )
+        VALUES ('cloudinary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        RETURNING id, secure_url
+      `).get(
+        result.public_id,
+        result.secure_url,
+        file.filename || "",
+        displayName,
+        altText,
+        mimeType,
+        file.data.length,
+        result.width || null,
+        result.height || null,
+        CLOUDINARY_FOLDER,
+        user.id
+      );
+    } catch (dbError) {
+      console.error("Cloudinary upload succeeded but media_assets insert failed.", { public_id: result.public_id, message: dbError.message });
+      throw new Error("圖片已上傳，但媒體資料保存失敗。請聯絡管理員處理。");
+    }
+    const context = String(form.fields.context || "");
+    const productId = Number(form.fields.product_id || 0);
+    if (context === "mall" && productId) {
+      const product = db.prepare("SELECT id, product_code FROM products WHERE id = ?").get(productId);
+      if (product) {
+        db.prepare("UPDATE products SET media_asset_id = ?, image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(asset.id, asset.secure_url, product.id);
+        return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&message=${encodeURIComponent("圖片已上傳並套用到商品。")}`);
+      }
+    }
+    if (context === "mall") {
+      return redirect(res, `/admin/mall?media=${asset.id}&message=${encodeURIComponent("圖片已上傳，已帶回商品表單。")}`);
+    }
+    return redirect(res, `/admin/media?message=${encodeURIComponent("圖片上傳成功。")}`);
+  } catch (error) {
+    const safeMessage = String(error?.message || "圖片上傳失敗。").replace(/api[_-]?secret|CLOUDINARY_API_SECRET/ig, "secret");
+    const fallback = form?.fields?.context === "mall" ? "/admin/mall" : "/admin/media";
+    return redirect(res, `${fallback}?message=${encodeURIComponent(safeMessage)}`);
+  }
+}
+
 async function handlePost(req, res, pathname) {
+  if (pathname === "/admin/media/upload") return handleMediaUpload(req, res);
   const body = await readBody(req);
   if (pathname === "/login") {
     const loginEmail = normalizeEmail(body.email);
@@ -1437,12 +1764,14 @@ async function handlePost(req, res, pathname) {
     const typeId = Number(body.type_id);
     const categoryId = body.category_id ? Number(body.category_id) : null;
     const shortDescription = String(body.short_description || "").trim();
-    const imageUrl = validHttpUrl(body.image_url, false);
+    const selectedMedia = mediaAssetById(body.media_asset_id);
+    const mediaAssetId = selectedMedia ? selectedMedia.id : null;
+    const imageUrl = selectedMedia ? selectedMedia.secure_url : validHttpUrl(body.image_url, false);
     const productPageUrl = validHttpUrl(body.product_page_url, true);
     const price = parseOptionalPrice(body.price);
     const sortOrder = Number(body.sort_order || 0);
     const isActive = body.is_active === "1" ? 1 : 0;
-    const values = { ...body, id, product_code: productCode, type_id: typeId, category_id: categoryId, price, sort_order: sortOrder, is_active: isActive };
+    const values = { ...body, id, product_code: productCode, type_id: typeId, category_id: categoryId, media_asset_id: mediaAssetId, image_url: imageUrl || body.image_url || "", price, sort_order: sortOrder, is_active: isActive };
     if (!/^[A-Z0-9_-]{2,40}$/.test(productCode)) return adminMallPage(req, res, user, "商品編號只能使用英文、數字、底線或連字號。", values);
     if (!name) return adminMallPage(req, res, user, "請輸入商品名稱。", values);
     if (!db.prepare("SELECT id FROM product_types WHERE id = ?").get(typeId)) return adminMallPage(req, res, user, "請選擇有效的商品類型。", values);
@@ -1457,16 +1786,16 @@ async function handlePost(req, res, pathname) {
         if (!existing) return adminMallPage(req, res, user, "找不到要修改的商品。", values);
         db.prepare(`
           UPDATE products
-          SET product_code = ?, name = ?, type_id = ?, category_id = ?, short_description = ?, image_url = ?,
+          SET product_code = ?, name = ?, type_id = ?, category_id = ?, short_description = ?, media_asset_id = ?, image_url = ?,
               product_page_url = ?, price = ?, currency = 'TWD', payment_provider = 'ecpay',
               is_active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
-        `).run(productCode, name, typeId, categoryId, shortDescription, imageUrl || "", productPageUrl, price, isActive, sortOrder, id);
+        `).run(productCode, name, typeId, categoryId, shortDescription, mediaAssetId, imageUrl || "", productPageUrl, price, isActive, sortOrder, id);
       } else {
         db.prepare(`
-          INSERT INTO products (product_code, name, type_id, category_id, short_description, image_url, product_page_url, price, currency, payment_provider, is_active, sort_order)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'TWD', 'ecpay', ?, ?)
-        `).run(productCode, name, typeId, categoryId, shortDescription, imageUrl || "", productPageUrl, price, isActive, sortOrder);
+          INSERT INTO products (product_code, name, type_id, category_id, short_description, media_asset_id, image_url, product_page_url, price, currency, payment_provider, is_active, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'TWD', 'ecpay', ?, ?)
+        `).run(productCode, name, typeId, categoryId, shortDescription, mediaAssetId, imageUrl || "", productPageUrl, price, isActive, sortOrder);
       }
       return redirect(res, "/admin/mall");
     } catch (error) {
@@ -1725,6 +2054,7 @@ async function router(req, res) {
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
     if (pathname === "/admin/mall") { const user = requireUser(req, res, ["admin"]); if (user) return adminMallPage(req, res, user); return; }
+    if (pathname === "/admin/media") { const user = requireUser(req, res, ["admin"]); if (user) return adminMediaPage(req, res, user); return; }
     if (pathname === "/admin/reports") { const user = requireUser(req, res, ["admin"]); if (user) return adminReports(req, res, user); return; }
     if (pathname === "/admin/manager-requests") { const user = requireUser(req, res, ["admin"]); if (user) return managerRequestsPage(res, user); return; }
     if (pathname === "/admin/audit-logs") { const user = requireUser(req, res, ["admin"]); if (user) return adminAuditPage(res, user); return; }
