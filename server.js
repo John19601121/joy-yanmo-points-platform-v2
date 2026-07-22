@@ -4,6 +4,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { v2: cloudinary } = require("cloudinary");
+const { applyMigrations } = require("./lib/migrations");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -17,7 +18,7 @@ const PUBLIC_IMAGES_DIR = path.join(PUBLIC_DIR, "images");
 const PLATFORM_NAME = "LT 大健康成交會員積分管理平台";
 const PLATFORM_VERSION = "V1.0 正式版";
 const EXPORT_PREFIX = "lt-health-sales-points";
-const SESSION_SECRET = process.env.SESSION_SECRET || "dev-change-me-lt-health-sales";
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("base64url");
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
 const SUPER_ADMIN_EMAIL = String(process.env.INITIAL_ADMIN_EMAIL || "").trim().toLowerCase();
 const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "lt-health-products";
@@ -37,7 +38,7 @@ if (isCloudinaryConfigured()) {
 }
 
 if (process.env.NODE_ENV === "production") {
-  if (SESSION_SECRET === "dev-change-me-lt-health-sales" || SESSION_SECRET.length < 32) {
+  if (!process.env.SESSION_SECRET || SESSION_SECRET.length < 32) {
     throw new Error("Production requires SESSION_SECRET with at least 32 characters.");
   }
   if (!SUPER_ADMIN_EMAIL || !process.env.INITIAL_ADMIN_PASSWORD) {
@@ -50,6 +51,7 @@ const db = new DatabaseSync(DB_PATH);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec(fs.readFileSync(SCHEMA_PATH, "utf8"));
 runMigrations();
+applyMigrations(db, path.join(ROOT, "migrations"));
 
 const zhType = { purchase: "購買點數", gift: "贈予點數", consume: "消費扣點" };
 const zhStatus = { completed: "已完成", pending: "待核准", rejected: "已拒絕", approved: "已核准" };
