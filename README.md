@@ -64,7 +64,7 @@ node server.js
 - 分店專屬連結：`http://127.0.0.1:3000/store/taipei-xinyi/login`
 - 會員：`http://127.0.0.1:3000/member/login`
 
-測試資料的密碼皆為 `password123`：
+本機測試資料的密碼由開發環境自行設定；正式環境不得使用共用或範例密碼：
 
 | 角色 | Email |
 | --- | --- |
@@ -117,6 +117,9 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 ## 正式環境注意事項
 
 - 必須設定正式的 `SESSION_SECRET`。
+- `SESSION_SECRET` 至少需 32 個字元；正式環境缺少必要安全設定時，服務會拒絕啟動。
+- `INITIAL_ADMIN_EMAIL` 與 `INITIAL_ADMIN_PASSWORD` 不得使用公開範例值；既有部署升級後會執行一次性的管理員密碼輪替。
+- 新增分店與會員時，初始密碼需為 12 至 128 個字元；核准管理員時會產生只顯示一次的隨機臨時密碼。
 - SQLite 資料庫位置由 `DATABASE_PATH` 控制；Render 預設為 `/var/data/app.sqlite`。
 - 請定期備份持久化資料庫。
 - 初始帳號登入後應立即修改密碼。
