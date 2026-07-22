@@ -19,12 +19,11 @@ const PLATFORM_VERSION = "V1.0 正式版";
 const EXPORT_PREFIX = "lt-health-sales-points";
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-change-me-lt-health-sales";
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
-const SUPER_ADMIN_EMAIL = "luodayu168@gmail.com";
-const SUPER_ADMIN_INITIAL_PASSWORD = "QazxsW12345";
-const DEFAULT_MANAGER_PASSWORD = "password123";
+const SUPER_ADMIN_EMAIL = String(process.env.INITIAL_ADMIN_EMAIL || "").trim().toLowerCase();
 const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "lt-health-products";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 256 * 1024;
+const MAX_FORM_BYTES = 64 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 
@@ -37,8 +36,13 @@ if (isCloudinaryConfigured()) {
   });
 }
 
-if (process.env.NODE_ENV === "production" && SESSION_SECRET === "dev-change-me-lt-health-sales") {
-  throw new Error("Production requires SESSION_SECRET.");
+if (process.env.NODE_ENV === "production") {
+  if (SESSION_SECRET === "dev-change-me-lt-health-sales" || SESSION_SECRET.length < 32) {
+    throw new Error("Production requires SESSION_SECRET with at least 32 characters.");
+  }
+  if (!SUPER_ADMIN_EMAIL || !process.env.INITIAL_ADMIN_PASSWORD) {
+    throw new Error("Production requires INITIAL_ADMIN_EMAIL and INITIAL_ADMIN_PASSWORD.");
+  }
 }
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -66,6 +70,14 @@ function hashPassword(password) {
   const iterations = 120000;
   const hash = crypto.pbkdf2Sync(password, salt, iterations, 32, "sha256").toString("base64url");
   return `pbkdf2$${iterations}$${salt}$${hash}`;
+}
+
+function generateTemporaryPassword() {
+  return crypto.randomBytes(18).toString("base64url");
+}
+
+function validInitialPassword(password) {
+  return typeof password === "string" && password.length >= 12 && password.length <= 128;
 }
 
 function columnExists(table, column) {
@@ -164,15 +176,31 @@ function runMigrations() {
 }
 
 function ensureSuperAdmin() {
+  if (!SUPER_ADMIN_EMAIL) return;
+  db.exec("CREATE TABLE IF NOT EXISTS app_security_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);");
   const existing = db.prepare("SELECT id FROM users WHERE email = ? AND role = 'admin'").get(SUPER_ADMIN_EMAIL);
   if (existing) {
     db.prepare("UPDATE users SET is_super_admin = 1, status = 'active' WHERE id = ?").run(existing.id);
+    const migrationName = "p0-rotate-bootstrap-admin-credentials-v1";
+    const migrated = db.prepare("SELECT name FROM app_security_migrations WHERE name = ?").get(migrationName);
+    if (!migrated && process.env.INITIAL_ADMIN_PASSWORD) {
+      db.exec("BEGIN");
+      try {
+        db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(process.env.INITIAL_ADMIN_PASSWORD), existing.id);
+        db.prepare("INSERT INTO app_security_migrations (name) VALUES (?)").run(migrationName);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
     return;
   }
+  if (!process.env.INITIAL_ADMIN_PASSWORD) return;
   db.prepare(`
     INSERT INTO users (role, name, phone, email, password_hash, status, is_super_admin)
     VALUES ('admin', '總部專職管理員', '', ?, ?, 'active', 1)
-  `).run(SUPER_ADMIN_EMAIL, hashPassword(SUPER_ADMIN_INITIAL_PASSWORD));
+  `).run(SUPER_ADMIN_EMAIL, hashPassword(process.env.INITIAL_ADMIN_PASSWORD));
 }
 
 function generateMemberCode() {
@@ -209,7 +237,9 @@ function verifyPassword(password, stored) {
   const [method, iterText, salt, hash] = String(stored || "").split("$");
   if (method !== "pbkdf2" || !iterText || !salt || !hash) return false;
   const candidate = crypto.pbkdf2Sync(password, salt, Number(iterText), 32, "sha256").toString("base64url");
-  return crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(hash));
+  const candidateBuffer = Buffer.from(candidate);
+  const hashBuffer = Buffer.from(hash);
+  return candidateBuffer.length === hashBuffer.length && crypto.timingSafeEqual(candidateBuffer, hashBuffer);
 }
 
 function sign(value) {
@@ -230,8 +260,15 @@ function makeToken(user) {
 function parseToken(token) {
   if (!token || !token.includes(".")) return null;
   const [payload, sig] = token.split(".");
-  if (sign(payload) !== sig) return null;
-  const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  const expected = Buffer.from(sign(payload));
+  const received = Buffer.from(sig);
+  if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return null;
+  let data;
+  try {
+    data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
   if (!data.exp || data.exp < Date.now()) return null;
   const user = db.prepare("SELECT id, role, name, email, phone, store_id, status, is_super_admin FROM users WHERE id = ?").get(data.id) || null;
   if (user?.status === "disabled") return null;
@@ -241,7 +278,11 @@ function parseToken(token) {
 function parseCookies(header = "") {
   return Object.fromEntries(header.split(";").filter(Boolean).map((part) => {
     const [key, ...rest] = part.trim().split("=");
-    return [key, decodeURIComponent(rest.join("="))];
+    try {
+      return [key, decodeURIComponent(rest.join("="))];
+    } catch {
+      return [key, ""];
+    }
   }));
 }
 
@@ -323,12 +364,12 @@ function loginPathForRole(role) {
 }
 
 function send(res, status, body, headers = {}) {
-  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", ...headers });
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", ...securityHeaders(), ...headers });
   res.end(body);
 }
 
 function sendText(res, status, body, headers = {}) {
-  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...headers });
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...securityHeaders(), ...headers });
   res.end(body);
 }
 
@@ -365,15 +406,51 @@ function recordAdminAudit(req, { eventType, email, user = null, result, failureR
 }
 
 function isSuperAdmin(user) {
-  return user?.role === "admin" && (user.is_super_admin === 1 || user.email === SUPER_ADMIN_EMAIL);
+  return user?.role === "admin" && user.is_super_admin === 1;
 }
 
-function readBody(req) {
-  return new Promise((resolve) => {
+function securityHeaders() {
+  return {
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' https: data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self' https:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
+  };
+}
+
+function readBody(req, maxBytes = MAX_FORM_BYTES) {
+  return new Promise((resolve, reject) => {
     let raw = "";
-    req.on("data", (chunk) => { raw += chunk; });
-    req.on("end", () => resolve(Object.fromEntries(new URLSearchParams(raw))));
+    let bytes = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        tooLarge = true;
+        raw = "";
+        return;
+      }
+      if (!tooLarge) raw += chunk;
+    });
+    req.on("end", () => {
+      if (tooLarge) reject(Object.assign(new Error("Request body too large."), { statusCode: 413 }));
+      else resolve(Object.fromEntries(new URLSearchParams(raw)));
+    });
+    req.on("error", reject);
   });
+}
+
+function isSameOriginPost(req) {
+  if (String(req.headers["sec-fetch-site"] || "").toLowerCase() === "cross-site") return false;
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const protocol = COOKIE_SECURE ? "https:" : "http:";
+    return new URL(origin).origin === `${protocol}//${req.headers.host}`;
+  } catch {
+    return false;
+  }
 }
 
 function bufferSplit(buffer, separator) {
@@ -584,7 +661,7 @@ function loginPage(role, error = "", slug = "") {
         <div class="field"><label>密碼</label><input name="password" type="password" required></div>
         <button class="button">登入</button>
       </form>
-      <p class="muted">測試密碼：password123</p>
+      ${process.env.NODE_ENV === "production" ? "" : `<p class="muted">本機測試帳號請依開發環境設定。</p>`}
     </section>
     <section class="hero"></section>
   </div>`);
@@ -853,7 +930,7 @@ function storeForm(error = "", values = {}) {
     <div class="field"><label>聯絡人</label><input name="contact_name" value="${escapeHtml(values.contact_name || "")}" required></div>
     <div class="field"><label>電話</label><input name="phone" value="${escapeHtml(values.phone || "")}" required></div>
     <div class="field"><label>Email / 登入帳號</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
-    <div class="field"><label>初始密碼</label><input name="password" value="${escapeHtml(values.password || "password123")}" required></div>
+    <div class="field"><label>初始密碼</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
     <button class="button">建立分店</button>
   </form>`;
 }
@@ -899,7 +976,7 @@ function memberForm(error = "", values = {}) {
     <div class="field"><label>姓名</label><input name="name" value="${escapeHtml(values.name || "")}" required></div>
     <div class="field"><label>電話</label><input name="phone" value="${escapeHtml(values.phone || "")}" required></div>
     <div class="field"><label>Email / 會員登入帳號</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
-    <div class="field"><label>初始密碼</label><input name="password" value="${escapeHtml(values.password || "password123")}" required></div>
+    <div class="field"><label>初始密碼</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
     <button class="button">建立會員</button>
   </form>`;
 }
@@ -1530,7 +1607,7 @@ function managerRequestForm(user, error = "", values = {}) {
     <div class="field"><label>角色</label><select name="role">${roleOptions}</select></div>
     <div class="field"><label>所屬分店</label><select name="store_id"><option value="">無</option>${storeOptions}</select></div>
     <button class="button">送出申請</button>
-  </form><p class="muted">核准後初始密碼為 ${DEFAULT_MANAGER_PASSWORD}，使用者可登入後自行修改。</p>`;
+  </form><p class="muted">核准後會產生一次性顯示的隨機臨時密碼，請安全交付給使用者並要求立即修改。</p>`;
 }
 
 function managerRequestsPage(res, user, error = "") {
@@ -1664,6 +1741,7 @@ async function handleMediaUpload(req, res) {
 }
 
 async function handlePost(req, res, pathname) {
+  if (!isSameOriginPost(req)) return send(res, 403, page("請求遭拒", `<div class="empty">基於安全性，此跨網站請求已被拒絕。</div>`));
   if (pathname === "/admin/media/upload") return handleMediaUpload(req, res);
   const body = await readBody(req);
   if (pathname === "/login") {
@@ -1696,7 +1774,7 @@ async function handlePost(req, res, pathname) {
     if (user.role === "admin") {
       recordAdminAudit(req, { eventType: "login", email: user.email, user, result: "success" });
     }
-    res.writeHead(302, { "Set-Cookie": `session=${encodeURIComponent(makeToken(user))}; HttpOnly; SameSite=Lax; Path=/; ${COOKIE_SECURE ? "Secure; " : ""}`, Location: target });
+    res.writeHead(302, { ...securityHeaders(), "Cache-Control": "no-store", "Set-Cookie": `session=${encodeURIComponent(makeToken(user))}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800; ${COOKIE_SECURE ? "Secure; " : ""}`, Location: target });
     return res.end();
   }
   if (pathname === "/logout") {
@@ -1704,7 +1782,7 @@ async function handlePost(req, res, pathname) {
     if (user?.role === "admin") {
       recordAdminAudit(req, { eventType: "logout", email: user.email, user, result: "success" });
     }
-    res.writeHead(302, { "Set-Cookie": "session=; Max-Age=0; Path=/", Location: "/" });
+    res.writeHead(302, { ...securityHeaders(), "Set-Cookie": `session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/; ${COOKIE_SECURE ? "Secure; " : ""}`, Location: "/" });
     return res.end();
   }
   if (pathname === "/account/password") {
@@ -1721,7 +1799,8 @@ async function handlePost(req, res, pathname) {
     }
     db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hashPassword(body.new_password), user.id);
     res.writeHead(302, {
-      "Set-Cookie": "session=; Max-Age=0; Path=/",
+      ...securityHeaders(),
+      "Set-Cookie": `session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/; ${COOKIE_SECURE ? "Secure; " : ""}`,
       Location: `${loginPathForRole(user.role)}?passwordChanged=1`
     });
     return res.end();
@@ -1814,6 +1893,7 @@ async function handlePost(req, res, pathname) {
   }
   if (pathname === "/admin/stores") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (!validInitialPassword(body.password)) return send(res, 400, page("新增分店", storeForm("初始密碼需為 12 至 128 個字元。", body), user));
     if (emailExistsForRole(body.email, "store")) {
       return send(res, 400, page("新增分店", storeForm("此 Email 已在相同角色中使用，請更換 Email。", body), user));
     }
@@ -1827,7 +1907,7 @@ async function handlePost(req, res, pathname) {
       db.prepare(`
         INSERT INTO users (role, name, phone, email, password_hash, store_id)
         VALUES ('store', ?, ?, ?, ?, ?)
-      `).run(body.store_name, body.phone, normalizeEmail(body.email), hashPassword(body.password || "password123"), store.id);
+      `).run(body.store_name, body.phone, normalizeEmail(body.email), hashPassword(body.password), store.id);
       db.exec("COMMIT");
       return redirect(res, `/admin/stores/${store.id}`);
     } catch (error) {
@@ -1840,6 +1920,7 @@ async function handlePost(req, res, pathname) {
   }
   if (pathname === "/store/members") {
     const user = requireUser(req, res, ["store"]); if (!user) return;
+    if (!validInitialPassword(body.password)) return send(res, 400, page("新增會員", memberForm("初始密碼需為 12 至 128 個字元。", body), user));
     if (emailExistsForRole(body.email, "member")) {
       return send(res, 400, page("新增會員", memberForm("此 Email 已在相同角色中使用，請更換 Email。", body), user));
     }
@@ -1848,7 +1929,7 @@ async function handlePost(req, res, pathname) {
       const newUser = db.prepare(`
         INSERT INTO users (role, name, phone, email, password_hash, store_id)
         VALUES ('member', ?, ?, ?, ?, ?) RETURNING id
-      `).get(body.name, body.phone, normalizeEmail(body.email), hashPassword(body.password || "password123"), user.store_id);
+      `).get(body.name, body.phone, normalizeEmail(body.email), hashPassword(body.password), user.store_id);
       const member = db.prepare(`
         INSERT INTO members (store_id, user_id, member_code, name, phone, email)
         VALUES (?, ?, ?, ?, ?, ?) RETURNING id
@@ -1905,13 +1986,14 @@ async function handlePost(req, res, pathname) {
     if (emailExistsForRole(request.email, request.role)) return managerRequestsPage(res, user, "此 Email 已在相同角色中使用，無法核准此申請。");
     try {
       db.exec("BEGIN");
+      const temporaryPassword = generateTemporaryPassword();
       const newUser = db.prepare(`
         INSERT INTO users (role, name, phone, email, password_hash, store_id, status)
         VALUES (?, ?, ?, ?, ?, ?, 'active') RETURNING id
-      `).get(request.role, request.name, request.phone || "", request.email, hashPassword(DEFAULT_MANAGER_PASSWORD), request.role === "store" ? request.store_id : null);
+      `).get(request.role, request.name, request.phone || "", request.email, hashPassword(temporaryPassword), request.role === "store" ? request.store_id : null);
       db.prepare("UPDATE admin_account_requests SET status = 'approved', user_id = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(newUser.id, user.id, request.id);
       db.exec("COMMIT");
-      return redirect(res, "/admin/manager-requests");
+      return managerRequestsPage(res, user, `帳號已核准。臨時密碼（僅顯示一次）：${temporaryPassword}`);
     } catch (error) {
       db.exec("ROLLBACK");
       if (isUniqueConstraintError(error)) return managerRequestsPage(res, user, uniqueConstraintMessage(error));
@@ -2036,7 +2118,7 @@ async function router(req, res) {
       return sendText(res, 404, "Not found");
     }
     if (req.method === "GET" && handleExport(req, res, pathname)) return;
-    if (req.method === "POST") return handlePost(req, res, pathname);
+    if (req.method === "POST") return await handlePost(req, res, pathname);
 
     if (pathname === "/") return redirect(res, "/admin/login");
     const passwordChangedMessage = url.searchParams.get("passwordChanged") ? "密碼已更新，請使用新密碼重新登入。" : "";
@@ -2082,11 +2164,12 @@ async function router(req, res) {
 
     send(res, 404, page("找不到頁面", `<div class="empty">找不到這個頁面。</div>`, currentUser(req)));
   } catch (error) {
-    console.error(error);
+    const status = Number(error?.statusCode) || 500;
+    if (status >= 500) console.error(error);
     if (isUniqueConstraintError(error)) {
       return send(res, 400, page("資料重複", `<div class="notice">${uniqueConstraintMessage(error)}</div>`, currentUser(req)));
     }
-    send(res, 500, page("系統錯誤", `<div class="empty">${escapeHtml(error.message)}</div>`, currentUser(req)));
+    send(res, status, page("系統錯誤", `<div class="empty">${status === 413 ? "請求內容過大。" : "系統暫時無法處理請求，請稍後再試。"}</div>`, currentUser(req)));
   }
 }
 

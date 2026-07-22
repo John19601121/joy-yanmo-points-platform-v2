@@ -33,8 +33,16 @@ function hashPassword(password) {
   return `pbkdf2$${iterations}$${salt}$${hash}`;
 }
 
-const superAdminEmail = "luodayu168@gmail.com";
-const superAdminPassword = "QazxsW12345";
+const isProduction = process.env.NODE_ENV === "production";
+const superAdminEmail = String(process.env.INITIAL_ADMIN_EMAIL || "").trim().toLowerCase();
+const superAdminPassword = process.env.INITIAL_ADMIN_PASSWORD || "";
+if (isProduction && (!superAdminEmail || !superAdminPassword || superAdminPassword.length < 12)) {
+  throw new Error("Production requires INITIAL_ADMIN_EMAIL and INITIAL_ADMIN_PASSWORD (at least 12 characters).");
+}
+if (!superAdminEmail || !superAdminPassword) {
+  console.log("Database ready. No bootstrap admin configured.");
+  process.exit(0);
+}
 const existingSuperAdmin = db.prepare("SELECT id, email FROM users WHERE role = 'admin' AND email = ? LIMIT 1").get(superAdminEmail);
 
 if (existingSuperAdmin) {
@@ -47,14 +55,14 @@ if (existingSuperAdmin) {
   process.exit(0);
 }
 
-const adminEmail = process.env.INITIAL_ADMIN_EMAIL || superAdminEmail;
-const adminPassword = process.env.INITIAL_ADMIN_PASSWORD || superAdminPassword;
+const adminEmail = superAdminEmail;
+const adminPassword = superAdminPassword;
 const adminName = process.env.INITIAL_ADMIN_NAME || "總部專職管理員";
 
 db.prepare(`
   INSERT INTO users (role, name, phone, email, password_hash, status, is_super_admin)
   VALUES ('admin', ?, ?, ?, ?, 'active', ?)
-`).run(adminName, process.env.INITIAL_ADMIN_PHONE || "", adminEmail, hashPassword(adminPassword), adminEmail === superAdminEmail ? 1 : 0);
+`).run(adminName, process.env.INITIAL_ADMIN_PHONE || "", adminEmail, hashPassword(adminPassword), 1);
 
 console.log("Database ready. Initial admin created.");
 console.log(`Admin email: ${adminEmail}`);
