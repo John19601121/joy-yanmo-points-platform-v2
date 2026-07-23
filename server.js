@@ -616,7 +616,7 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/mall", "商城"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/members", "會員列表"], ["/admin/mall", "商城"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/mall", "商城"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
       : [["/member/dashboard", "會員中心"], ["/member/mall", "商城"], ["/member/share-center", "我的成交中心"]];
@@ -943,6 +943,24 @@ function adminStores(req, res, user) {
     <tr><td>${escapeHtml(s.store_name)}</td><td>${escapeHtml(s.contact_name)}<br><span class="muted">${escapeHtml(s.phone)}</span></td><td>${escapeHtml(s.email)}</td><td><a href="/store/${escapeHtml(s.platform_slug)}/login">/store/${escapeHtml(s.platform_slug)}/login</a></td><td class="actions"><a class="button secondary" href="/admin/stores/${s.id}">詳細</a><a class="button" href="/admin/stores/${s.id}/view">進入後台</a></td></tr>
   `).join("")}</tbody></table>` : `<div class="empty">尚未建立分店。</div>`;
   send(res, 200, page("分店列表", `<div class="actions" style="margin-bottom:16px"><a class="button" href="/admin/stores/new">新增分店</a></div>${table}`, user));
+}
+
+function adminMembers(req, res, user) {
+  const rows = db.prepare(`
+    SELECT m.member_code, m.name, m.email, m.phone, s.store_name,
+      COALESCE(SUM(CASE WHEN pt.type = 'purchase' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS purchase_points,
+      COALESCE(SUM(CASE WHEN pt.type = 'gift' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS gift_points,
+      COALESCE(SUM(CASE WHEN pt.type = 'consume' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS consume_points
+    FROM members m
+    LEFT JOIN stores s ON s.id = m.store_id
+    LEFT JOIN point_transactions pt ON pt.member_id = m.id
+    GROUP BY m.id
+    ORDER BY m.id DESC
+  `).all();
+  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>電話</th><th>所屬分店</th><th>購買</th><th>贈予</th><th>剩餘</th></tr></thead><tbody>${rows.map((m) => `
+    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${escapeHtml(m.store_name || "")}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td></tr>
+  `).join("")}</tbody></table>` : `<div class="empty">尚無會員。</div>`;
+  send(res, 200, page("會員列表", table, user));
 }
 
 function adminStoreDetail(req, res, user, id) {
@@ -2144,6 +2162,7 @@ async function router(req, res) {
     if (pathname === "/admin/audit-logs") { const user = requireUser(req, res, ["admin"]); if (user) return adminAuditPage(res, user); return; }
     if (pathname === "/admin/stores") { const user = requireUser(req, res, ["admin"]); if (user) return adminStores(req, res, user); return; }
     if (pathname === "/admin/stores/new") { const user = requireUser(req, res, ["admin"]); if (user) return send(res, 200, page("新增分店", storeForm(), user)); return; }
+    if (pathname === "/admin/members") { const user = requireUser(req, res, ["admin"]); if (user) return adminMembers(req, res, user); return; }
     const adminStore = pathname.match(/^\/admin\/stores\/(\d+)$/);
     if (adminStore) { const user = requireUser(req, res, ["admin"]); if (user) return adminStoreDetail(req, res, user, adminStore[1]); return; }
     const adminView = pathname.match(/^\/admin\/stores\/(\d+)\/view$/);
