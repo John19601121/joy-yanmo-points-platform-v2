@@ -64,13 +64,7 @@ node server.js
 - 分店專屬連結：`http://127.0.0.1:3000/store/taipei-xinyi/login`
 - 會員：`http://127.0.0.1:3000/member/login`
 
-本機測試資料的密碼由開發環境自行設定；正式環境不得使用共用或範例密碼：
-
-| 角色 | Email |
-| --- | --- |
-| 總部 Admin | `admin@lt-health-sales.test` |
-| 分店 Store | `taipei@lt-health-sales.test` |
-| 會員 Member | `member.lin@example.com` |
+本機測試資料的登入資訊由 Seed 指令輸出，僅限隔離的開發資料庫使用；正式環境不得使用測試帳號、共用密碼或範例密碼。
 
 ## Render 部署
 
@@ -123,3 +117,12 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 - SQLite 資料庫位置由 `DATABASE_PATH` 控制；Render 預設為 `/var/data/app.sqlite`。
 - 請定期備份持久化資料庫。
 - 初始帳號登入後應立即修改密碼。
+# 核心會員資料架構（開發中）
+
+版本化遷移位於 `migrations/`，啟動與 `npm run migrate` 都會依序套用尚未執行的新增式遷移。已套用檔案的 SHA-256 會記錄於 `schema_migrations`；遷移檔套用後不得修改。
+
+會員自行註冊與匯入啟用預設關閉，可由資料庫 `feature_flags` 控制；環境變數 `FEATURE_MEMBER_SELF_REGISTRATION` 與 `FEATURE_MEMBER_IMPORT_ACTIVATION` 若有設定則優先。正式環境在另行核准前不得設為 `true`。
+
+會員啟用信使用 Resend HTTPS API。正式啟用前須另行核准並在部署環境設定 `APP_BASE_URL`、`RESEND_API_KEY`、`ACTIVATION_EMAIL_FROM` 與 `ACTIVATION_TOKEN_TTL_MINUTES`；API Key 不得寫入 Repository。正式 `APP_BASE_URL` 必須使用 HTTPS。自動測試注入假傳輸，不寄送真實 Email。
+
+本階段不包含金流、分潤計算、LT Token 發放或完整銀行帳號儲存。
