@@ -123,4 +123,6 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 
 會員自行註冊與匯入啟用預設關閉，可由資料庫 `feature_flags` 控制；環境變數 `FEATURE_MEMBER_SELF_REGISTRATION` 與 `FEATURE_MEMBER_IMPORT_ACTIVATION` 若有設定則優先。正式環境在另行核准前不得設為 `true`。
 
+會員啟用信使用 Resend HTTPS API。正式啟用前須另行核准並在部署環境設定 `APP_BASE_URL`、`RESEND_API_KEY`、`ACTIVATION_EMAIL_FROM` 與 `ACTIVATION_TOKEN_TTL_MINUTES`；API Key 不得寫入 Repository。正式 `APP_BASE_URL` 必須使用 HTTPS。自動測試注入假傳輸，不寄送真實 Email。
+
 本階段不包含金流、分潤計算、LT Token 發放或完整銀行帳號儲存。

@@ -5,6 +5,8 @@ const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { v2: cloudinary } = require("cloudinary");
 const { applyMigrations } = require("./lib/migrations");
+const memberFoundation = require("./lib/member-foundation");
+const activationEmail = require("./lib/activation-email");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -27,6 +29,11 @@ const MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 256 * 1024;
 const MAX_FORM_BYTES = 64 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const configuredActivationTtl = Number.parseInt(process.env.ACTIVATION_TOKEN_TTL_MINUTES || "1440", 10);
+const ACTIVATION_TOKEN_TTL_MINUTES = Number.isFinite(configuredActivationTtl)
+  ? Math.max(15, configuredActivationTtl)
+  : 1440;
+const ACTIVATION_EMAIL_EVENTS = ["activation_email_requested"];
 
 if (isCloudinaryConfigured()) {
   cloudinary.config({
@@ -80,6 +87,20 @@ function generateTemporaryPassword() {
 
 function validInitialPassword(password) {
   return typeof password === "string" && password.length >= 12 && password.length <= 128;
+}
+
+function validMemberName(value) {
+  const length = String(value || "").trim().length;
+  return length >= 2 && length <= 80;
+}
+
+function validMemberEmail(value) {
+  const email = memberFoundation.normalizeEmail(value);
+  return Boolean(email && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+}
+
+function validMemberPhone(value) {
+  return /^09\d{8}$/.test(memberFoundation.normalizePhone(value) || "");
 }
 
 function columnExists(table, column) {
@@ -663,9 +684,71 @@ function loginPage(role, error = "", slug = "") {
         <div class="field"><label>密碼</label><input name="password" type="password" required></div>
         <button class="button">登入</button>
       </form>
+      ${role === "member" && memberFoundation.featureEnabled(db, "member_self_registration")
+        ? `<p><a href="/member/register">尚未加入？建立會員帳號</a></p>`
+        : ""}
       ${process.env.NODE_ENV === "production" ? "" : `<p class="muted">本機測試帳號請依開發環境設定。</p>`}
     </section>
     <section class="hero"></section>
+  </div>`);
+}
+
+function memberRegistrationPage(error = "", values = {}, completed = false) {
+  if (completed) {
+    return page("會員註冊完成", `<div class="login">
+      <section class="login-card">
+        <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
+        <h1>請檢查您的 Email</h1>
+        <div class="notice">若資料正確，啟用信將寄至您填寫的 Email。請使用信中的一次性連結設定密碼。</div>
+        <p class="muted">沒有收到信？請稍候幾分鐘後使用安全重寄功能。</p>
+        <form class="stack" method="post" action="/member/activation/resend">
+          <div class="field"><label>Email</label><input name="email" type="email" maxlength="254" required></div>
+          <button class="button secondary">重寄啟用信</button>
+        </form>
+      </section><section class="hero"></section>
+    </div>`);
+  }
+  return page("會員註冊", `<div class="login">
+    <section class="login-card">
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
+      <h1>建立會員帳號</h1>
+      <p class="muted">完成資料後，系統會建立待啟用帳號。</p>
+      ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+      <form class="stack" method="post" action="/member/register">
+        <div class="field"><label>姓名</label><input name="name" maxlength="80" value="${escapeHtml(values.name || "")}" required autofocus></div>
+        <div class="field"><label>Email</label><input name="email" type="email" maxlength="254" autocomplete="email" value="${escapeHtml(values.email || "")}" required></div>
+        <div class="field"><label>手機</label><input name="phone" inputmode="tel" maxlength="20" autocomplete="tel" placeholder="0912345678" value="${escapeHtml(values.phone || "")}" required></div>
+        <div class="field"><label>推薦碼（選填）</label><input name="referral_code" maxlength="32" value="${escapeHtml(values.referral_code || "")}"></div>
+        <button class="button">送出註冊</button>
+      </form>
+      <p><a href="/member/login">返回會員登入</a></p>
+    </section><section class="hero"></section>
+  </div>`);
+}
+
+function memberActivationPage(token, error = "", success = false) {
+  if (success) {
+    return page("帳號已啟用", `<div class="login">
+      <section class="login-card">
+        <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
+        <h1>帳號啟用完成</h1>
+        <div class="notice">密碼已設定，現在可以登入會員中心。</div>
+        <p><a class="button" href="/member/login">前往會員登入</a></p>
+      </section><section class="hero"></section>
+    </div>`);
+  }
+  return page("啟用會員帳號", `<div class="login">
+    <section class="login-card">
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
+      <h1>設定會員密碼</h1>
+      ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+      <form class="stack" method="post" action="/member/activate">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <div class="field"><label>新密碼</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required autofocus></div>
+        <div class="field"><label>確認新密碼</label><input name="confirm_password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+        <button class="button">設定密碼並啟用</button>
+      </form>
+    </section><section class="hero"></section>
   </div>`);
 }
 
@@ -1764,6 +1847,153 @@ async function handlePost(req, res, pathname) {
   if (!isSameOriginPost(req)) return send(res, 403, page("請求遭拒", `<div class="empty">基於安全性，此跨網站請求已被拒絕。</div>`));
   if (pathname === "/admin/media/upload") return handleMediaUpload(req, res);
   const body = await readBody(req);
+  if (pathname === "/member/register") {
+    if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
+      return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
+    }
+    if (!validMemberName(body.name)) return send(res, 400, memberRegistrationPage("姓名需為 2 至 80 個字元。", body));
+    if (!validMemberEmail(body.email)) return send(res, 400, memberRegistrationPage("請輸入有效的 Email。", body));
+    if (!validMemberPhone(body.phone)) return send(res, 400, memberRegistrationPage("請輸入有效的台灣手機號碼，例如 0912345678。", body));
+    const requestIp = clientIp(req);
+    if (memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      ip: requestIp,
+      sinceMinutes: 60
+    }) >= 10) {
+      return send(res, 429, memberRegistrationPage("請求過於頻繁，請稍後再試。", {}), { "Retry-After": "3600" });
+    }
+    let memberCode = generateMemberCode();
+    while (db.prepare("SELECT id FROM members WHERE member_code = ?").get(memberCode)) memberCode = generateMemberCode();
+    try {
+      const registered = memberFoundation.registerPendingMember(db, {
+        name: body.name,
+        email: body.email,
+        phone: body.phone,
+        memberCode,
+        temporaryPasswordHash: hashPassword(generateTemporaryPassword()),
+        referralCode: String(body.referral_code || "").trim() || null,
+        activationTtlMinutes: ACTIVATION_TOKEN_TTL_MINUTES
+      });
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_requested",
+        memberId: registered.memberId,
+        email: body.email,
+        ip: requestIp,
+        result: "requested"
+      });
+      try {
+        const sent = await activationEmail.sendActivationEmail({
+          to: body.email,
+          name: body.name,
+          token: registered.activationToken
+        });
+        memberFoundation.recordActivationEmailAudit(db, {
+          eventType: "activation_email_sent",
+          memberId: registered.memberId,
+          email: body.email,
+          ip: requestIp,
+          result: "sent",
+          reason: sent.id
+        });
+      } catch (emailError) {
+        memberFoundation.recordActivationEmailAudit(db, {
+          eventType: "activation_email_failed",
+          memberId: registered.memberId,
+          email: body.email,
+          ip: requestIp,
+          result: "failed",
+          reason: emailError.message
+        });
+      }
+      return send(res, 201, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
+    } catch (error) {
+      const messages = {
+        "Referrer is invalid.": "推薦碼不存在或推薦人尚未啟用，請確認後再試。"
+      };
+      if (error.message === "Email is already registered." || error.message === "Phone is already registered.") {
+        return send(res, 202, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
+      }
+      if (messages[error.message]) return send(res, 400, memberRegistrationPage(messages[error.message], body));
+      throw error;
+    }
+  }
+  if (pathname === "/member/activation/resend") {
+    if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
+      return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
+    }
+    const email = memberFoundation.normalizeEmail(body.email);
+    const requestIp = clientIp(req);
+    const genericResponse = () => send(res, 202, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
+    if (!validMemberEmail(email)) return genericResponse();
+    const emailAttempts = memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      email,
+      sinceMinutes: 60
+    });
+    const ipAttempts = memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      ip: requestIp,
+      sinceMinutes: 60
+    });
+    if (emailAttempts >= 3 || ipAttempts >= 10) {
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_rate_limited",
+        email,
+        ip: requestIp,
+        result: "blocked"
+      });
+      return genericResponse();
+    }
+    const pending = memberFoundation.pendingMemberByEmail(db, email);
+    if (!pending) return genericResponse();
+    const token = memberFoundation.createActivationToken(db, pending.memberId, ACTIVATION_TOKEN_TTL_MINUTES);
+    memberFoundation.recordActivationEmailAudit(db, {
+      eventType: "activation_email_requested",
+      memberId: pending.memberId,
+      email,
+      ip: requestIp,
+      result: "requested"
+    });
+    try {
+      const sent = await activationEmail.sendActivationEmail({ to: email, name: pending.name, token });
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_sent",
+        memberId: pending.memberId,
+        email,
+        ip: requestIp,
+        result: "sent",
+        reason: sent.id
+      });
+    } catch (emailError) {
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_failed",
+        memberId: pending.memberId,
+        email,
+        ip: requestIp,
+        result: "failed",
+        reason: emailError.message
+      });
+    }
+    return genericResponse();
+  }
+  if (pathname === "/member/activate") {
+    const token = String(body.token || "");
+    if (!validInitialPassword(body.password)) {
+      return send(res, 400, memberActivationPage(token, "密碼需為 12 至 128 個字元。"));
+    }
+    if (body.password !== body.confirm_password) {
+      return send(res, 400, memberActivationPage(token, "密碼與確認密碼不一致。"));
+    }
+    try {
+      memberFoundation.activateMemberWithPassword(db, token, hashPassword(body.password));
+      return send(res, 200, memberActivationPage("", "", true), { "Cache-Control": "no-store" });
+    } catch (error) {
+      if (/invalid or expired|not pending/i.test(error.message)) {
+        return send(res, 400, memberActivationPage("", "此啟用連結無效、已使用或已過期，請重新申請。"));
+      }
+      throw error;
+    }
+  }
   if (pathname === "/login") {
     const loginEmail = normalizeEmail(body.email);
     const user = db.prepare("SELECT * FROM users WHERE lower(email) = ? AND role = ?").get(loginEmail, body.role);
@@ -1785,6 +2015,17 @@ async function handlePost(req, res, pathname) {
         recordAdminAudit(req, { eventType: "login", email: body.email, user, result: "failed", failureReason: "帳號停用" });
       }
       return send(res, 403, loginPage(body.role || "member", "此帳號已停用，請聯絡管理員。", body.slug || ""));
+    }
+    if (user.role === "member") {
+      const profile = db.prepare(`SELECT member_profiles.activation_status
+        FROM members JOIN member_profiles ON member_profiles.member_id = members.id
+        WHERE members.user_id = ?`).get(user.id);
+      if (profile?.activation_status === "pending") {
+        return send(res, 403, loginPage("member", "帳號尚未啟用，請使用啟用連結設定密碼。"));
+      }
+      if (profile?.activation_status === "disabled") {
+        return send(res, 403, loginPage("member", "此會員帳號已停用，請聯絡平台。"));
+      }
     }
     if (body.role === "store" && body.slug) {
       const store = db.prepare("SELECT * FROM stores WHERE platform_slug = ?").get(body.slug);
@@ -2145,6 +2386,17 @@ async function router(req, res) {
     if (pathname === "/admin/login") return send(res, 200, loginPage("admin", passwordChangedMessage));
     if (pathname === "/store/login") return send(res, 200, loginPage("store", passwordChangedMessage));
     if (pathname === "/member/login") return send(res, 200, loginPage("member", passwordChangedMessage));
+    if (pathname === "/member/register") {
+      if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
+        return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
+      }
+      return send(res, 200, memberRegistrationPage());
+    }
+    if (pathname === "/member/activate") {
+      const token = url.searchParams.get("token") || "";
+      if (!token) return send(res, 400, memberActivationPage("", "啟用連結不完整。"));
+      return send(res, 200, memberActivationPage(token), { "Cache-Control": "no-store" });
+    }
     const slugLogin = pathname.match(/^\/store\/([^/]+)\/login$/);
     if (slugLogin) return send(res, 200, loginPage("store", "", slugLogin[1]));
 
