@@ -6,6 +6,8 @@ COPY package.json ./
 RUN npm install --omit=dev
 
 COPY schema.sql server.js ./
+COPY lib ./lib
+COPY migrations ./migrations
 COPY scripts ./scripts
 COPY public ./public
 
