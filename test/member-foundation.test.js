@@ -98,6 +98,94 @@ test("issuing or using an activation token invalidates every older token", () =>
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
+test("self registration creates a pending headquarters member and audit trail", () => {
+  const { db, directory } = database();
+  const referrerId = addMember(db, "11");
+  db.prepare("INSERT INTO member_profiles (member_id, activation_status) VALUES (?, 'active')").run(referrerId);
+  const result = foundation.registerPendingMember(db, {
+    name: " 新會員 ",
+    email: " NEW@Example.com ",
+    phone: "+886 912-345-679",
+    memberCode: "LTSELF00001",
+    temporaryPasswordHash: "temporary-hash",
+    referralCode: "LTTEST11"
+  });
+  const member = db.prepare(`SELECT members.*, users.password_hash, member_profiles.activation_status,
+      member_profiles.normalized_email, member_profiles.normalized_phone, stores.is_system_default
+    FROM members
+    JOIN users ON users.id = members.user_id
+    JOIN member_profiles ON member_profiles.member_id = members.id
+    JOIN stores ON stores.id = members.store_id
+    WHERE members.id = ?`).get(result.memberId);
+  assert.equal(member.name, "新會員");
+  assert.equal(member.normalized_email, "new@example.com");
+  assert.equal(member.normalized_phone, "0912345679");
+  assert.equal(member.activation_status, "pending");
+  assert.equal(member.is_system_default, 1);
+  assert.equal(member.password_hash, "temporary-hash");
+  assert.equal(db.prepare("SELECT referrer_member_id FROM member_referrals WHERE member_id = ?").get(result.memberId).referrer_member_id, referrerId);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM audit_events WHERE event_type = 'member_self_registered' AND subject_id = ?").get(result.memberId).count, 1);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("self registration rejects duplicate identities and invalid referrers atomically", () => {
+  const { db, directory } = database();
+  foundation.registerPendingMember(db, {
+    name: "第一位",
+    email: "first@example.com",
+    phone: "0912345680",
+    memberCode: "LTSELF00002",
+    temporaryPasswordHash: "temporary-hash"
+  });
+  const before = db.prepare("SELECT COUNT(*) count FROM members").get().count;
+  assert.throws(() => foundation.registerPendingMember(db, {
+    name: "重複者",
+    email: " FIRST@EXAMPLE.COM ",
+    phone: "0912345681",
+    memberCode: "LTSELF00003",
+    temporaryPasswordHash: "temporary-hash"
+  }), /Email is already registered/);
+  assert.throws(() => foundation.registerPendingMember(db, {
+    name: "手機重複",
+    email: "phone-duplicate@example.com",
+    phone: "+886 912-345-680",
+    memberCode: "LTSELF00003",
+    temporaryPasswordHash: "temporary-hash"
+  }), /Phone is already registered/);
+  assert.throws(() => foundation.registerPendingMember(db, {
+    name: "無效推薦",
+    email: "second@example.com",
+    phone: "0912345682",
+    memberCode: "LTSELF00004",
+    temporaryPasswordHash: "temporary-hash",
+    referralCode: "NOT-FOUND"
+  }), /Referrer is invalid/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM members").get().count, before);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("password activation updates credentials, consumes token and writes audit once", () => {
+  const { db, directory } = database();
+  const registered = foundation.registerPendingMember(db, {
+    name: "待啟用",
+    email: "pending@example.com",
+    phone: "0912345683",
+    memberCode: "LTSELF00005",
+    temporaryPasswordHash: "temporary-hash"
+  });
+  const token = foundation.createActivationToken(db, registered.memberId);
+  assert.equal(foundation.activateMemberWithPassword(db, token, "final-password-hash"), registered.memberId);
+  const row = db.prepare(`SELECT users.password_hash, member_profiles.activation_status
+    FROM members JOIN users ON users.id = members.user_id
+    JOIN member_profiles ON member_profiles.member_id = members.id
+    WHERE members.id = ?`).get(registered.memberId);
+  assert.equal(row.password_hash, "final-password-hash");
+  assert.equal(row.activation_status, "active");
+  assert.throws(() => foundation.activateMemberWithPassword(db, token, "other-hash"), /invalid or expired/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM audit_events WHERE event_type = 'member_activated_with_password'").get().count, 1);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
 test("feature flags remain off unless explicitly enabled", () => {
   const { db, directory } = database();
   assert.equal(foundation.featureEnabled(db, "member_self_registration"), false);
