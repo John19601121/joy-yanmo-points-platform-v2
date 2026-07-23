@@ -1175,8 +1175,8 @@ function memberShareCenter(req, res, user) {
     return send(res, 404, page("找不到商品", `<div class="empty">找不到此商品，或商品尚未上架。</div><p><a class="button" href="/member/mall">返回商城</a></p>`, user));
   }
   const shareUrl = product
-    ? `https://tally.so/r/RGlpAl?product=${encodeURIComponent(product.product_code)}&ref=${encodeURIComponent(memberCode)}`
-    : `https://tally.so/r/RGlpAl?ref=${encodeURIComponent(memberCode)}`;
+    ? `https://tally.so/r/1A5eO4?product=${encodeURIComponent(product.product_code)}&ref=${encodeURIComponent(memberCode)}`
+    : `https://tally.so/r/1A5eO4?ref=${encodeURIComponent(memberCode)}`;
   send(res, 200, page("我的成交中心", `<div class="panel">
     <p class="muted">分享您的專屬連結，系統將自動記錄推薦來源。</p>
     ${product ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
