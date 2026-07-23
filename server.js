@@ -6,6 +6,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { v2: cloudinary } = require("cloudinary");
 const { applyMigrations } = require("./lib/migrations");
 const memberFoundation = require("./lib/member-foundation");
+const activationEmail = require("./lib/activation-email");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -28,6 +29,11 @@ const MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 256 * 1024;
 const MAX_FORM_BYTES = 64 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const configuredActivationTtl = Number.parseInt(process.env.ACTIVATION_TOKEN_TTL_MINUTES || "1440", 10);
+const ACTIVATION_TOKEN_TTL_MINUTES = Number.isFinite(configuredActivationTtl)
+  ? Math.max(15, configuredActivationTtl)
+  : 1440;
+const ACTIVATION_EMAIL_EVENTS = ["activation_email_requested"];
 
 if (isCloudinaryConfigured()) {
   cloudinary.config({
@@ -687,15 +693,18 @@ function loginPage(role, error = "", slug = "") {
   </div>`);
 }
 
-function memberRegistrationPage(error = "", values = {}, activationUrl = "") {
-  if (activationUrl) {
+function memberRegistrationPage(error = "", values = {}, completed = false) {
+  if (completed) {
     return page("會員註冊完成", `<div class="login">
       <section class="login-card">
         <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>會員積分管理平台</span></div></div>
-        <h1>註冊資料已建立</h1>
-        <div class="notice">您的帳號目前為待啟用。請使用下方一次性連結設定密碼；連結將於 24 小時後失效。</div>
-        <p><a class="button" href="${escapeHtml(activationUrl)}">設定密碼並啟用帳號</a></p>
-        <p class="muted">此連結只顯示一次，請勿轉傳給他人。</p>
+        <h1>請檢查您的 Email</h1>
+        <div class="notice">若資料正確，啟用信將寄至您填寫的 Email。請使用信中的一次性連結設定密碼。</div>
+        <p class="muted">沒有收到信？請稍候幾分鐘後使用安全重寄功能。</p>
+        <form class="stack" method="post" action="/member/activation/resend">
+          <div class="field"><label>Email</label><input name="email" type="email" maxlength="254" required></div>
+          <button class="button secondary">重寄啟用信</button>
+        </form>
       </section><section class="hero"></section>
     </div>`);
   }
@@ -1845,6 +1854,14 @@ async function handlePost(req, res, pathname) {
     if (!validMemberName(body.name)) return send(res, 400, memberRegistrationPage("姓名需為 2 至 80 個字元。", body));
     if (!validMemberEmail(body.email)) return send(res, 400, memberRegistrationPage("請輸入有效的 Email。", body));
     if (!validMemberPhone(body.phone)) return send(res, 400, memberRegistrationPage("請輸入有效的台灣手機號碼，例如 0912345678。", body));
+    const requestIp = clientIp(req);
+    if (memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      ip: requestIp,
+      sinceMinutes: 60
+    }) >= 10) {
+      return send(res, 429, memberRegistrationPage("請求過於頻繁，請稍後再試。", {}), { "Retry-After": "3600" });
+    }
     let memberCode = generateMemberCode();
     while (db.prepare("SELECT id FROM members WHERE member_code = ?").get(memberCode)) memberCode = generateMemberCode();
     try {
@@ -1854,20 +1871,110 @@ async function handlePost(req, res, pathname) {
         phone: body.phone,
         memberCode,
         temporaryPasswordHash: hashPassword(generateTemporaryPassword()),
-        referralCode: String(body.referral_code || "").trim() || null
+        referralCode: String(body.referral_code || "").trim() || null,
+        activationTtlMinutes: ACTIVATION_TOKEN_TTL_MINUTES
       });
-      const token = memberFoundation.createActivationToken(db, registered.memberId);
-      const activationUrl = `/member/activate?token=${encodeURIComponent(token)}`;
-      return send(res, 201, memberRegistrationPage("", {}, activationUrl), { "Cache-Control": "no-store" });
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_requested",
+        memberId: registered.memberId,
+        email: body.email,
+        ip: requestIp,
+        result: "requested"
+      });
+      try {
+        const sent = await activationEmail.sendActivationEmail({
+          to: body.email,
+          name: body.name,
+          token: registered.activationToken
+        });
+        memberFoundation.recordActivationEmailAudit(db, {
+          eventType: "activation_email_sent",
+          memberId: registered.memberId,
+          email: body.email,
+          ip: requestIp,
+          result: "sent",
+          reason: sent.id
+        });
+      } catch (emailError) {
+        memberFoundation.recordActivationEmailAudit(db, {
+          eventType: "activation_email_failed",
+          memberId: registered.memberId,
+          email: body.email,
+          ip: requestIp,
+          result: "failed",
+          reason: emailError.message
+        });
+      }
+      return send(res, 201, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
     } catch (error) {
       const messages = {
-        "Email is already registered.": "此 Email 已註冊，請直接登入或聯絡平台。",
-        "Phone is already registered.": "此手機號碼已註冊，請直接登入或聯絡平台。",
         "Referrer is invalid.": "推薦碼不存在或推薦人尚未啟用，請確認後再試。"
       };
+      if (error.message === "Email is already registered." || error.message === "Phone is already registered.") {
+        return send(res, 202, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
+      }
       if (messages[error.message]) return send(res, 400, memberRegistrationPage(messages[error.message], body));
       throw error;
     }
+  }
+  if (pathname === "/member/activation/resend") {
+    if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
+      return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
+    }
+    const email = memberFoundation.normalizeEmail(body.email);
+    const requestIp = clientIp(req);
+    const genericResponse = () => send(res, 202, memberRegistrationPage("", {}, true), { "Cache-Control": "no-store" });
+    if (!validMemberEmail(email)) return genericResponse();
+    const emailAttempts = memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      email,
+      sinceMinutes: 60
+    });
+    const ipAttempts = memberFoundation.activationEmailAttemptCount(db, {
+      eventTypes: ACTIVATION_EMAIL_EVENTS,
+      ip: requestIp,
+      sinceMinutes: 60
+    });
+    if (emailAttempts >= 3 || ipAttempts >= 10) {
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_rate_limited",
+        email,
+        ip: requestIp,
+        result: "blocked"
+      });
+      return genericResponse();
+    }
+    const pending = memberFoundation.pendingMemberByEmail(db, email);
+    if (!pending) return genericResponse();
+    const token = memberFoundation.createActivationToken(db, pending.memberId, ACTIVATION_TOKEN_TTL_MINUTES);
+    memberFoundation.recordActivationEmailAudit(db, {
+      eventType: "activation_email_requested",
+      memberId: pending.memberId,
+      email,
+      ip: requestIp,
+      result: "requested"
+    });
+    try {
+      const sent = await activationEmail.sendActivationEmail({ to: email, name: pending.name, token });
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_sent",
+        memberId: pending.memberId,
+        email,
+        ip: requestIp,
+        result: "sent",
+        reason: sent.id
+      });
+    } catch (emailError) {
+      memberFoundation.recordActivationEmailAudit(db, {
+        eventType: "activation_email_failed",
+        memberId: pending.memberId,
+        email,
+        ip: requestIp,
+        result: "failed",
+        reason: emailError.message
+      });
+    }
+    return genericResponse();
   }
   if (pathname === "/member/activate") {
     const token = String(body.token || "");

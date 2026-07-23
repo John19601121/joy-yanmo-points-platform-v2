@@ -125,6 +125,60 @@ test("self registration creates a pending headquarters member and audit trail", 
   assert.equal(member.password_hash, "temporary-hash");
   assert.equal(db.prepare("SELECT referrer_member_id FROM member_referrals WHERE member_id = ?").get(result.memberId).referrer_member_id, referrerId);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM audit_events WHERE event_type = 'member_self_registered' AND subject_id = ?").get(result.memberId).count, 1);
+  assert.ok(result.activationToken);
+  assert.notEqual(
+    db.prepare("SELECT token_hash FROM member_activation_tokens WHERE member_id = ?").get(result.memberId).token_hash,
+    result.activationToken
+  );
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("registration and its activation token roll back together", () => {
+  const { db, directory } = database();
+  db.exec(`CREATE TRIGGER reject_registration_token BEFORE INSERT ON member_activation_tokens
+    BEGIN SELECT RAISE(ABORT, 'simulated token failure'); END;`);
+  assert.throws(() => foundation.registerPendingMember(db, {
+    name: "交易測試",
+    email: "atomic@example.com",
+    phone: "0912345690",
+    memberCode: "LTSELF00010",
+    temporaryPasswordHash: "temporary-hash"
+  }), /simulated token failure/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM users WHERE email = 'atomic@example.com'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM members WHERE email = 'atomic@example.com'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM audit_events WHERE event_type = 'member_self_registered'").get().count, 0);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("activation Email audit supports persistent Email and IP rate limits", () => {
+  const { db, directory } = database();
+  const registered = foundation.registerPendingMember(db, {
+    name: "限流測試",
+    email: "rate@example.com",
+    phone: "0912345691",
+    memberCode: "LTSELF00011",
+    temporaryPasswordHash: "temporary-hash"
+  });
+  foundation.recordActivationEmailAudit(db, {
+    eventType: "activation_email_requested",
+    memberId: registered.memberId,
+    email: " RATE@example.com ",
+    ip: "192.0.2.1",
+    result: "requested"
+  });
+  assert.equal(foundation.activationEmailAttemptCount(db, {
+    eventTypes: ["activation_email_requested", "activation_email_sent"],
+    email: "rate@example.com"
+  }), 1);
+  assert.equal(foundation.activationEmailAttemptCount(db, {
+    eventTypes: "activation_email_requested",
+    ip: "192.0.2.1"
+  }), 1);
+  assert.deepEqual({ ...foundation.pendingMemberByEmail(db, "RATE@example.com") }, {
+    memberId: registered.memberId,
+    name: "限流測試",
+    email: "rate@example.com"
+  });
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
