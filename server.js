@@ -7,6 +7,9 @@ const { v2: cloudinary } = require("cloudinary");
 const { applyMigrations } = require("./lib/migrations");
 const memberFoundation = require("./lib/member-foundation");
 const activationEmail = require("./lib/activation-email");
+const ecpay = require("./lib/ecpay");
+const orderFoundation = require("./lib/order-foundation");
+const notificationCenter = require("./lib/notification-center");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -637,7 +640,7 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/members", "會員列表"], ["/admin/mall", "商城"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/members", "會員列表"], ["/admin/mall", "商城"], ["/admin/orders", "訂單中心"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/mall", "商城"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
       : [["/member/dashboard", "會員中心"], ["/member/mall", "商城"], ["/member/share-center", "我的成交中心"]];
@@ -1402,6 +1405,139 @@ function memberShareCenter(req, res, user) {
   </script>`, user));
 }
 
+function paymentStatusLabel(status) {
+  return {
+    pending: "等待付款",
+    paid: "付款成功",
+    failed: "付款失敗",
+    cancelled: "已取消",
+    refund_pending: "退款處理中",
+    refunded: "已退款"
+  }[status] || status;
+}
+
+function adminOrdersPage(req, res, user, message = "") {
+  const config = ecpay.paymentConfig();
+  const testProduct = db.prepare(`SELECT p.product_code, p.name, config.stage_price, config.checkout_mode,
+      config.distribution_json
+    FROM product_checkout_configs config
+    JOIN products p ON p.id = config.product_id
+    WHERE config.environment = 'stage'
+    ORDER BY config.id
+    LIMIT 1`).get();
+  const orders = db.prepare(`SELECT orders.*, members.member_code AS sharer_code
+    FROM orders
+    LEFT JOIN members ON members.id = orders.sharer_member_id
+    ORDER BY orders.id DESC
+    LIMIT 100`).all();
+  const distribution = testProduct ? orderFoundation.parseDistribution(testProduct.distribution_json) : null;
+  const readiness = [
+    ["測試環境總開關", config.mode === "stage" && process.env.ECPAY_STAGE_ENABLED === "true"],
+    ["測試 MerchantID／HashKey／HashIV", config.credentialsReady],
+    ["信用卡測試", config.creditEnabled],
+    ["ATM 正式資格", config.atmEnabled],
+    ["超商代碼正式資格", config.cvsEnabled]
+  ];
+  const orderRows = orders.length ? `<table class="table"><thead><tr>
+      <th>訂單</th><th>商品／金額</th><th>分享歸屬</th><th>付款</th><th>建立時間</th>
+    </tr></thead><tbody>${orders.map((order) => `<tr>
+      <td><b>${escapeHtml(order.order_no)}</b><br><span class="badge">${order.is_test ? "測試" : "正式"}</span></td>
+      <td>${money(order.total_amount)} ${escapeHtml(order.currency)}<br><span class="muted">${escapeHtml(order.environment)}</span></td>
+      <td>${escapeHtml(order.sharer_code || "未指定")}</td>
+      <td><span class="badge">${escapeHtml(paymentStatusLabel(order.payment_status))}</span><br><span class="muted">${escapeHtml(order.gateway_result_message || "")}</span></td>
+      <td>${escapeHtml(order.created_at)}</td>
+    </tr>`).join("")}</tbody></table>` : `<div class="empty">尚無 Render 核心訂單。</div>`;
+  send(res, 200, page("訂單中心", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+    <div class="grid split">
+      <section class="panel">
+        <h2>綠界測試環境</h2>
+        <p class="muted">正式金流保持鎖定；此處只允許總部管理員建立測試訂單。</p>
+        <table class="table"><tbody>${readiness.map(([label, ready]) => `<tr><th>${escapeHtml(label)}</th><td><span class="badge">${ready ? "已就緒" : "未啟用"}</span></td></tr>`).join("")}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>第一項測試商品</h2>
+        ${testProduct ? `<p><b>${escapeHtml(testProduct.name)}</b>（${escapeHtml(testProduct.product_code)}）</p>
+          <p>內部測試基準：<b>NT$ ${money(testProduct.stage_price)}</b></p>
+          <p class="muted">此金額不會覆寫商城售價，也不代表供應商正式核准。</p>
+          <div class="actions">${Object.entries(distribution).map(([role, rate]) => `<span class="badge">${escapeHtml({ supplier: "供應商", content: "內容製作", sharer: "推薦分享", platform: "平台", bonus_pool: "獎勵池" }[role])} ${rate}%</span>`).join("")}</div>
+          <form class="stack" method="post" action="/admin/orders/test" style="margin-top:16px">
+            <div class="field"><label>測試分享者會員編號（可留空）</label><input name="sharer_code" placeholder="LT20260700001"></div>
+            <button class="button" ${config.stageEnabled && config.creditEnabled ? "" : "disabled"}>建立測試訂單並前往綠界</button>
+          </form>` : `<div class="empty">尚未建立測試商品設定。</div>`}
+      </section>
+    </div>
+    <section class="panel" style="margin-top:16px">
+      <h2>最近訂單</h2>
+      ${orderRows}
+    </section>`, user), { "Cache-Control": "no-store" });
+}
+
+function paymentAutoSubmitPage(order, item, parameters, gatewayUrl, user) {
+  const hidden = Object.entries(parameters).map(([name, value]) =>
+    `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`
+  ).join("");
+  return page("前往綠界測試付款", `<section class="panel">
+    <h2>即將前往綠界測試環境</h2>
+    <p>訂單：<b>${escapeHtml(order.order_no)}</b></p>
+    <p>商品：${escapeHtml(item.product_name)}｜金額：<b>NT$ ${money(order.total_amount)}</b></p>
+    <div class="notice">這是測試訂單，不會使用龍捲風正式商店金鑰，也不會啟用正式撥款。</div>
+    <form id="ecpay-stage-form" method="post" action="${escapeHtml(gatewayUrl)}">
+      ${hidden}
+      <div class="actions">
+        <button class="button">繼續前往綠界測試頁</button>
+        <a class="button secondary" href="/admin/orders">返回訂單中心</a>
+      </div>
+    </form>
+  </section>`, user);
+}
+
+function publicPaymentResultPage(orderNo, message = "") {
+  const details = orderFoundation.orderWithDetails(db, orderNo);
+  if (!details) return page("付款結果", `<div class="empty">目前查無此測試訂單。</div>`);
+  const { order } = details;
+  return page("付款結果", `<div class="login">
+    <section class="login-card">
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>測試付款結果</span></div></div>
+      <h1>${escapeHtml(paymentStatusLabel(order.payment_status))}</h1>
+      ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+      <p>訂單編號：<b>${escapeHtml(order.order_no)}</b></p>
+      <p>金額：NT$ ${money(order.total_amount)}</p>
+      <p class="muted">付款狀態只以綠界伺服器通知及檢查碼驗證結果為準。</p>
+      <p><a class="button secondary" href="/member/login">返回會員登入</a></p>
+    </section>
+    <section class="hero" aria-hidden="true"></section>
+  </div>`);
+}
+
+async function handleEcpayReturn(req, res) {
+  try {
+    const payload = await readBody(req);
+    const result = orderFoundation.applyEcpayCallback(db, payload, ecpay.paymentConfig());
+    sendText(res, 200, "1|OK", { "Cache-Control": "no-store" });
+    if (result.paid && !result.duplicate) {
+      setImmediate(() => notificationCenter.sendPaymentNotification({ order: result.order }).catch((error) => {
+        console.warn("Notification center payment notice failed:", error.message);
+      }));
+    }
+  } catch (error) {
+    console.warn("ECPay ReturnURL rejected:", error.message);
+    sendText(res, 400, "0|Error", { "Cache-Control": "no-store" });
+  }
+}
+
+async function handleEcpayOrderResult(req, res) {
+  const payload = await readBody(req);
+  const config = ecpay.paymentConfig();
+  const valid = config.stageEnabled
+    && String(payload.MerchantID || "") === config.merchantId
+    && ecpay.verifyCheckMacValue(payload, config);
+  const orderNo = valid ? String(payload.MerchantTradeNo || "") : "";
+  const body = valid
+    ? publicPaymentResultPage(orderNo, "已返回平台；付款入帳仍以伺服器通知為準。")
+    : page("付款結果", `<div class="empty">付款結果驗證失敗，平台不會因此建立付款成功紀錄。</div>`);
+  send(res, valid ? 200 : 400, body, { "Cache-Control": "no-store" });
+}
+
 function mediaCardHtml(asset, { selectable = false } = {}) {
   const title = asset.display_name || asset.original_filename || `媒體 #${asset.id}`;
   return `<article class="card" style="display:grid;gap:10px">
@@ -1844,9 +1980,34 @@ async function handleMediaUpload(req, res) {
 }
 
 async function handlePost(req, res, pathname) {
+  if (pathname === "/payments/ecpay/return") return handleEcpayReturn(req, res);
+  if (pathname === "/payments/ecpay/order-result") return handleEcpayOrderResult(req, res);
   if (!isSameOriginPost(req)) return send(res, 403, page("請求遭拒", `<div class="empty">基於安全性，此跨網站請求已被拒絕。</div>`));
   if (pathname === "/admin/media/upload") return handleMediaUpload(req, res);
   const body = await readBody(req);
+  if (pathname === "/admin/orders/test") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    try {
+      const config = ecpay.paymentConfig();
+      ecpay.assertStageCheckoutAllowed(config);
+      const result = orderFoundation.createStageTestOrder(db, {
+        productCode: "SOAP001",
+        sharerCode: String(body.sharer_code || "").trim(),
+        actorUserId: user.id
+      });
+      const parameters = ecpay.buildCheckoutParameters(result.order, result.item, config);
+      const csp = "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action https://payment-stage.ecpay.com.tw";
+      return send(res, 201, paymentAutoSubmitPage(
+        result.order,
+        result.item,
+        parameters,
+        ecpay.checkoutGatewayUrl(config.mode),
+        user
+      ), { "Cache-Control": "no-store", "Content-Security-Policy": csp });
+    } catch (error) {
+      return adminOrdersPage(req, res, user, error.message);
+    }
+  }
   if (pathname === "/member/register") {
     if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
       return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
@@ -2399,6 +2560,9 @@ async function router(req, res) {
     }
     const slugLogin = pathname.match(/^\/store\/([^/]+)\/login$/);
     if (slugLogin) return send(res, 200, loginPage("store", "", slugLogin[1]));
+    if (pathname === "/payment/result") {
+      return send(res, 200, publicPaymentResultPage(url.searchParams.get("order") || ""), { "Cache-Control": "no-store" });
+    }
 
     if (pathname === "/account/password") {
       const user = requireUser(req, res, ["admin", "store", "member"]);
@@ -2408,6 +2572,7 @@ async function router(req, res) {
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
     if (pathname === "/admin/mall") { const user = requireUser(req, res, ["admin"]); if (user) return adminMallPage(req, res, user); return; }
+    if (pathname === "/admin/orders") { const user = requireUser(req, res, ["admin"]); if (user) return adminOrdersPage(req, res, user); return; }
     if (pathname === "/admin/media") { const user = requireUser(req, res, ["admin"]); if (user) return adminMediaPage(req, res, user); return; }
     if (pathname === "/admin/reports") { const user = requireUser(req, res, ["admin"]); if (user) return adminReports(req, res, user); return; }
     if (pathname === "/admin/manager-requests") { const user = requireUser(req, res, ["admin"]); if (user) return managerRequestsPage(res, user); return; }
