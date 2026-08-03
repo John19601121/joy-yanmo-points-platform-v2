@@ -14,6 +14,10 @@ LT 大健康成交會員積分管理平台是支援總部、分店與會員三�
 - 總部與分店報表中心
 - CSV 與 Excel 匯出
 - 商城商品資料 MVP，支援商品類型、分類、商品與會員成交中心連動
+- 新會員與推薦人建立持續有效的推薦關係；只有總部管理員可人工更換並保留歷程
+- 商品專屬分享20%、永久推薦人1%、商品／合作引薦人2%與獎勵池餘額自動分配
+- 活動分享、報名與30天臨時歸屬，不覆蓋既有永久推薦人
+- 平台短分享連結、來源Token、點擊紀錄與訂單建立時的歸屬快照
 - Email 可跨角色重複；同角色不可重複
 - 資料重複時顯示友善提示，不會因 UNIQUE 錯誤形成 Render 502
 
@@ -97,6 +101,10 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 - 分店商城：`/store/mall`
 - 會員商城：`/member/mall`
 - 會員商品成交中心：`/member/share-center?product=SOAP001`
+- 會員活動分享：`/member/share-center?event=活動代碼`
+- 會員推薦關係管理：`/admin/members/:id`
+- 活動分享管理：`/admin/events`
+- 訂單分潤明細：`/admin/orders/:orderNo`
 
 ## 商城資料
 
@@ -125,7 +133,7 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 
 會員啟用信使用 Resend HTTPS API。正式啟用前須另行核准並在部署環境設定 `APP_BASE_URL`、`RESEND_API_KEY`、`ACTIVATION_EMAIL_FROM` 與 `ACTIVATION_TOKEN_TTL_MINUTES`；API Key 不得寫入 Repository。正式 `APP_BASE_URL` 必須使用 HTTPS。自動測試注入假傳輸，不寄送真實 Email。
 
-## 訂單中心與綠界測試環境
+## 訂單中心與綠界環境
 
 Render 核心平台已準備下列「預設關閉」能力：
 
@@ -135,11 +143,11 @@ Render 核心平台已準備下列「預設關閉」能力：
 - `ReturnURL` 伺服器通知與 `OrderResultURL` 消費者返回頁分離
 - CheckMacValue、MerchantID、訂單金額與測試環境驗證
 - 重複回傳冪等處理
-- 付款成功後建立五方分配快照
+- 付款成功後建立完整分配快照
 - 龍捲風通知中心付款測試通知
 
-正式金流、真實扣款與正式退款均未啟用。測試環境的 MerchantID、HashKey、HashIV
-只可設定在 Render Environment Variables，不得寫入 Repository。環境變數預設如下：
+正式金流、真實扣款與正式退款均未啟用。測試與正式環境的 MerchantID、HashKey、HashIV
+使用不同欄位，且只可設定在 Render Environment Variables，不得寫入 Repository。環境變數預設如下：
 
 ```text
 ECPAY_MODE=disabled
@@ -150,11 +158,48 @@ ECPAY_HASH_IV=
 ECPAY_CREDIT_ENABLED=false
 ECPAY_ATM_ENABLED=false
 ECPAY_CVS_ENABLED=false
+ECPAY_PRODUCTION_ENABLED=false
+ECPAY_PRODUCTION_MERCHANT_ID=
+ECPAY_PRODUCTION_HASH_KEY=
+ECPAY_PRODUCTION_HASH_IV=
+ECPAY_PRODUCTION_CREDIT_ENABLED=false
+ECPAY_PRODUCTION_ATM_ENABLED=false
+ECPAY_PRODUCTION_CVS_ENABLED=false
 LINE_WEBHOOK_URL=
 ```
 
 只有在另行核准測試付款後，才可將 `ECPAY_MODE=stage`、
-`ECPAY_STAGE_ENABLED=true` 與 `ECPAY_CREDIT_ENABLED=true`。本版程式會拒絕
-`ECPAY_MODE=production`，避免誤啟用正式金流。
+`ECPAY_STAGE_ENABLED=true` 與 `ECPAY_CREDIT_ENABLED=true`。
 
-本階段仍不包含正式金流、正式退款、LT Token 發放或完整銀行帳號儲存。
+正式付款即使程式已準備完成，仍須同時滿足下列條件才會開放：
+
+- `ECPAY_MODE=production`
+- `ECPAY_PRODUCTION_ENABLED=true`
+- `ECPAY_PRODUCTION_MERCHANT_ID=3222651`
+- 正式 `ECPAY_PRODUCTION_HASH_KEY` 與 `ECPAY_PRODUCTION_HASH_IV` 均已設定
+- `ECPAY_PRODUCTION_CREDIT_ENABLED=true`
+
+任一條件不成立，`/checkout/SOAP001` 會顯示「正式付款尚未開放」，且不會建立綠界正式付款。
+`SOAP001` 正式方案以伺服器資料庫為準：體驗組 NT$200＋運費 NT$65＝NT$265，另含買5送1、
+買10送3與買20送10。運費不列入商品分潤；付款成功後才建立分配快照。
+
+本階段仍不包含正式退款、LT Token 發放或完整銀行帳號儲存。
+
+## 分享與分潤制度
+
+每筆商品訂單先保存當下的買家、成交分享者、永久推薦人、商品／合作引薦人及來源Token；
+之後管理員更換推薦關係，不會回溯改變舊訂單。
+
+- 供應商：40%
+- 內容製作：20%
+- 成交分享者：20%
+- 平台營運：10%
+- 獎勵池：10%
+  - 買家有永久推薦人時，提撥1%給永久推薦人
+  - 商品有合作引薦人時，提撥2%給商品／合作引薦人
+  - 兩者同時成立時，獎勵池保留7%
+
+會員點擊別人的商品分享連結，只會改變該筆訂單的20%成交分享歸屬，不會改綁永久推薦人。
+活動分享完成報名後建立30天臨時歸屬；期限內若沒有更直接的商品分享來源，可作為成交分享來源，
+但永久推薦人的1%仍依原關係計算。正式金流維持鎖定；目前自動化只在通過驗證的付款回傳後建立
+可稽核的分配快照，不會直接對外匯款。
