@@ -1559,8 +1559,61 @@ function paymentStatusLabel(status) {
   }[status] || status;
 }
 
+function productionCheckoutPage(req, res, productCode, {
+  error = "",
+  values = {},
+  status = 200
+} = {}) {
+  const config = ecpay.paymentConfig();
+  if (config.mode !== "production" || !config.productionEnabled || !config.creditEnabled) {
+    return send(res, 503, page("正式付款尚未開放", `<div class="login">
+      <section class="login-card">
+        <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>安全結帳</span></div></div>
+        <h1>正式付款尚未開放</h1>
+        <p class="muted">目前尚未啟用正式綠界收款，請稍後再試。</p>
+      </section><section class="hero" aria-hidden="true"></section>
+    </div>`), { "Cache-Control": "no-store" });
+  }
+  const product = db.prepare("SELECT id, product_code, name FROM products WHERE product_code = ? AND is_active = 1")
+    .get(String(productCode || "").trim().toUpperCase());
+  if (!product) return send(res, 404, page("找不到商品", `<div class="empty">找不到此商品或商品已下架。</div>`));
+  const offers = db.prepare(`SELECT * FROM product_checkout_offers
+    WHERE product_id = ? AND is_active = 1 ORDER BY sort_order, id`).all(product.id);
+  if (!offers.length) return send(res, 503, page("商品尚未開放結帳", `<div class="empty">此商品尚未設定正式方案。</div>`));
+  const selectedOfferCode = String(values.offer_code || offers[0].offer_code).trim().toLowerCase();
+  const checkoutToken = String(values.checkout_token || crypto.randomBytes(32).toString("base64url"));
+  const offerOptions = offers.map((offer) => {
+    const total = offer.merchandise_amount + offer.shipping_amount;
+    const selected = offer.offer_code === selectedOfferCode ? " selected" : "";
+    return `<option value="${escapeHtml(offer.offer_code)}"${selected}>${escapeHtml(offer.display_name)}｜商品 NT$ ${money(offer.merchandise_amount)}${offer.shipping_amount ? `＋運費 NT$ ${money(offer.shipping_amount)}` : "｜免運"}｜總額 NT$ ${money(total)}</option>`;
+  }).join("");
+  return send(res, status, page("安全結帳", `<div class="login">
+    <section class="login-card" style="padding-top:28px;padding-bottom:28px">
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>綠界安全結帳</span></div></div>
+      <h1>${escapeHtml(product.name)}</h1>
+      ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
+      <form class="stack" method="post" action="/checkout/${encodeURIComponent(product.product_code)}">
+        <input type="hidden" name="checkout_token" value="${escapeHtml(checkoutToken)}">
+        <input type="hidden" name="sharer_code" value="${escapeHtml(values.sharer_code || "")}">
+        <div class="field"><label>購買方案</label><select name="offer_code" required>${offerOptions}</select></div>
+        <div class="field"><label>訂購人姓名</label><input name="buyer_name" maxlength="80" value="${escapeHtml(values.buyer_name || "")}" required></div>
+        <div class="field"><label>Email</label><input name="buyer_email" type="email" maxlength="254" value="${escapeHtml(values.buyer_email || "")}" required></div>
+        <div class="field"><label>手機</label><input name="buyer_phone" inputmode="tel" maxlength="20" placeholder="0912345678" value="${escapeHtml(values.buyer_phone || "")}" required></div>
+        <div class="field"><label>收件人姓名</label><input name="receiver_name" maxlength="80" value="${escapeHtml(values.receiver_name || values.buyer_name || "")}" required></div>
+        <div class="field"><label>收件人手機</label><input name="receiver_phone" inputmode="tel" maxlength="20" placeholder="0912345678" value="${escapeHtml(values.receiver_phone || values.buyer_phone || "")}" required></div>
+        <div class="field"><label>郵遞區號</label><input name="shipping_postal_code" inputmode="numeric" maxlength="6" value="${escapeHtml(values.shipping_postal_code || "")}"></div>
+        <div class="field"><label>宅配地址</label><input name="shipping_address" maxlength="300" value="${escapeHtml(values.shipping_address || "")}" required></div>
+        <button class="button">建立訂單並前往綠界</button>
+        <p class="muted">付款成功以綠界伺服器通知及檢查碼驗證為準；運費不列入商品分潤。</p>
+      </form>
+    </section><section class="hero" aria-hidden="true"></section>
+  </div>`), { "Cache-Control": "no-store" });
+}
+
 function adminOrdersPage(req, res, user, message = "") {
   const config = ecpay.paymentConfig();
+  const stageConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "stage" });
+  const productionConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "production" });
   const testProduct = db.prepare(`SELECT p.product_code, p.name, config.stage_price, config.checkout_mode,
       config.distribution_json
     FROM product_checkout_configs config
@@ -1574,12 +1627,19 @@ function adminOrdersPage(req, res, user, message = "") {
     ORDER BY orders.id DESC
     LIMIT 100`).all();
   const distribution = testProduct ? orderFoundation.parseDistribution(testProduct.distribution_json) : null;
-  const readiness = [
-    ["測試環境總開關", config.mode === "stage" && process.env.ECPAY_STAGE_ENABLED === "true"],
-    ["測試 MerchantID／HashKey／HashIV", config.credentialsReady],
-    ["信用卡測試", config.creditEnabled],
-    ["ATM 正式資格", config.atmEnabled],
-    ["超商代碼正式資格", config.cvsEnabled]
+  const stageReadiness = [
+    ["目前模式選擇 Stage", config.mode === "stage"],
+    ["Stage 總開關", stageConfig.stageEnabled],
+    ["Stage MerchantID／HashKey／HashIV", stageConfig.credentialsReady],
+    ["Stage 信用卡測試", stageConfig.creditEnabled]
+  ];
+  const productionReadiness = [
+    ["目前模式選擇 Production", config.mode === "production"],
+    ["Production 總開關", process.env.ECPAY_PRODUCTION_ENABLED === "true"],
+    ["正式商店限定 3222651", productionConfig.productionMerchantApproved],
+    ["Production MerchantID／HashKey／HashIV", productionConfig.credentialsReady],
+    ["Production 信用卡收款", productionConfig.creditEnabled],
+    ["正式收款全部條件", productionConfig.productionEnabled && productionConfig.creditEnabled]
   ];
   const orderRows = orders.length ? `<table class="table"><thead><tr>
       <th>訂單</th><th>商品／金額</th><th>分享歸屬</th><th>付款</th><th>建立時間</th>
@@ -1595,7 +1655,9 @@ function adminOrdersPage(req, res, user, message = "") {
       <section class="panel">
         <h2>綠界測試環境</h2>
         <p class="muted">正式金流保持鎖定；此處只允許總部管理員建立測試訂單。</p>
-        <table class="table"><tbody>${readiness.map(([label, ready]) => `<tr><th>${escapeHtml(label)}</th><td><span class="badge">${ready ? "已就緒" : "未啟用"}</span></td></tr>`).join("")}</tbody></table>
+        <table class="table"><tbody>${stageReadiness.map(([label, ready]) => `<tr><th>${escapeHtml(label)}</th><td><span class="badge">${ready ? "已就緒" : "未啟用"}</span></td></tr>`).join("")}</tbody></table>
+        <h2 style="margin-top:22px">綠界正式環境</h2>
+        <table class="table"><tbody>${productionReadiness.map(([label, ready]) => `<tr><th>${escapeHtml(label)}</th><td><span class="badge">${ready ? "已就緒" : "未啟用"}</span></td></tr>`).join("")}</tbody></table>
       </section>
       <section class="panel">
         <h2>第一項測試商品</h2>
@@ -1643,19 +1705,20 @@ function adminOrderDetailPage(res, user, orderNo) {
 }
 
 function paymentAutoSubmitPage(order, item, parameters, gatewayUrl, user) {
+  const production = order.environment === "production" && !order.is_test;
   const hidden = Object.entries(parameters).map(([name, value]) =>
     `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`
   ).join("");
-  return page("前往綠界測試付款", `<section class="panel">
-    <h2>即將前往綠界測試環境</h2>
+  return page(production ? "前往綠界安全付款" : "前往綠界測試付款", `<section class="panel">
+    <h2>${production ? "即將前往綠界安全付款" : "即將前往綠界測試環境"}</h2>
     <p>訂單：<b>${escapeHtml(order.order_no)}</b></p>
     <p>商品：${escapeHtml(item.product_name)}｜金額：<b>NT$ ${money(order.total_amount)}</b></p>
-    <div class="notice">這是測試訂單，不會使用龍捲風正式商店金鑰，也不會啟用正式撥款。</div>
-    <form id="ecpay-stage-form" method="post" action="${escapeHtml(gatewayUrl)}">
+    <div class="notice">${production ? "這是正式訂單；請確認訂單與金額後再進入綠界付款。" : "這是測試訂單，不會使用龍捲風正式商店金鑰，也不會啟用正式撥款。"}</div>
+    <form id="ecpay-payment-form" method="post" action="${escapeHtml(gatewayUrl)}">
       ${hidden}
       <div class="actions">
-        <button class="button">繼續前往綠界測試頁</button>
-        <a class="button secondary" href="/admin/orders">返回訂單中心</a>
+        <button class="button">${production ? "前往綠界付款" : "繼續前往綠界測試頁"}</button>
+        ${production ? "" : `<a class="button secondary" href="/admin/orders">返回訂單中心</a>`}
       </div>
     </form>
   </section>`, user);
@@ -1663,11 +1726,12 @@ function paymentAutoSubmitPage(order, item, parameters, gatewayUrl, user) {
 
 function publicPaymentResultPage(orderNo, message = "") {
   const details = orderFoundation.orderWithDetails(db, orderNo);
-  if (!details) return page("付款結果", `<div class="empty">目前查無此測試訂單。</div>`);
+  if (!details) return page("付款結果", `<div class="empty">目前查無此訂單。</div>`);
   const { order } = details;
+  const production = order.environment === "production" && !order.is_test;
   return page("付款結果", `<div class="login">
     <section class="login-card">
-      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>測試付款結果</span></div></div>
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>${production ? "付款結果" : "測試付款結果"}</span></div></div>
       <h1>${escapeHtml(paymentStatusLabel(order.payment_status))}</h1>
       ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
       <p>訂單編號：<b>${escapeHtml(order.order_no)}</b></p>
@@ -1682,7 +1746,9 @@ function publicPaymentResultPage(orderNo, message = "") {
 async function handleEcpayReturn(req, res) {
   try {
     const payload = await readBody(req);
-    const result = orderFoundation.applyEcpayCallback(db, payload, ecpay.paymentConfig());
+    const config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
+    if (!config) throw new Error("ECPay callback MerchantID is not active.");
+    const result = orderFoundation.applyEcpayCallback(db, payload, config);
     sendText(res, 200, "1|OK", { "Cache-Control": "no-store" });
     if (result.paid && !result.duplicate) {
       setImmediate(() => notificationCenter.sendPaymentNotification({ order: result.order }).catch((error) => {
@@ -1697,8 +1763,9 @@ async function handleEcpayReturn(req, res) {
 
 async function handleEcpayOrderResult(req, res) {
   const payload = await readBody(req);
-  const config = ecpay.paymentConfig();
-  const valid = config.stageEnabled
+  const config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
+  const valid = Boolean(config)
+    && (config.stageEnabled || config.productionEnabled)
     && String(payload.MerchantID || "") === config.merchantId
     && ecpay.verifyCheckMacValue(payload, config);
   const orderNo = valid ? String(payload.MerchantTradeNo || "") : "";
@@ -2155,6 +2222,57 @@ async function handlePost(req, res, pathname) {
   if (!isSameOriginPost(req)) return send(res, 403, page("請求遭拒", `<div class="empty">基於安全性，此跨網站請求已被拒絕。</div>`));
   if (pathname === "/admin/media/upload") return handleMediaUpload(req, res);
   const body = await readBody(req);
+  const productionCheckoutMatch = pathname.match(/^\/checkout\/([A-Za-z0-9_-]+)$/);
+  if (productionCheckoutMatch) {
+    const productCode = productionCheckoutMatch[1].toUpperCase();
+    try {
+      const config = ecpay.paymentConfig();
+      ecpay.assertProductionCheckoutAllowed(config);
+      if (!validMemberName(body.buyer_name)) throw new Error("請填寫正確的訂購人姓名。");
+      if (!validMemberEmail(body.buyer_email)) throw new Error("請填寫正確的 Email。");
+      if (!validMemberPhone(body.buyer_phone)) throw new Error("請填寫正確的台灣手機號碼。");
+      if (!validMemberName(body.receiver_name)) throw new Error("請填寫正確的收件人姓名。");
+      if (!validMemberPhone(body.receiver_phone)) throw new Error("請填寫正確的收件人手機號碼。");
+      const postalCode = String(body.shipping_postal_code || "").trim();
+      if (postalCode && !/^\d{3,6}$/.test(postalCode)) throw new Error("郵遞區號格式不正確。");
+      const shippingAddress = String(body.shipping_address || "").trim();
+      if (shippingAddress.length < 6 || shippingAddress.length > 300) throw new Error("請填寫完整宅配地址。");
+      const result = orderFoundation.createProductionOrder(db, {
+        productCode,
+        offerCode: String(body.offer_code || "").trim(),
+        buyerName: body.buyer_name,
+        buyerEmail: body.buyer_email,
+        buyerPhone: body.buyer_phone,
+        receiverName: body.receiver_name,
+        receiverPhone: body.receiver_phone,
+        shippingPostalCode: postalCode,
+        shippingAddress,
+        sharerCode: String(body.sharer_code || "").trim(),
+        checkoutSource: "lt-health.com.tw",
+        checkoutToken: String(body.checkout_token || "").trim()
+      });
+      if (result.reused && result.order.payment_status !== "pending") {
+        throw new Error("此訂單已完成或無法再次付款，請重新進入商品頁建立新訂單。");
+      }
+      const parameters = ecpay.buildCheckoutParameters(result.order, result.item, config);
+      const gatewayUrl = ecpay.checkoutGatewayUrl(config.mode);
+      const gatewayOrigin = new URL(gatewayUrl).origin;
+      const csp = `default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action ${gatewayOrigin}`;
+      if (!result.reused) {
+        setImmediate(() => notificationCenter.sendOrderNotification({ order: result.order, item: result.item })
+          .catch((error) => console.warn("Notification center order notice failed:", error.message)));
+      }
+      return send(res, 201, paymentAutoSubmitPage(
+        result.order,
+        result.item,
+        parameters,
+        gatewayUrl,
+        null
+      ), { "Cache-Control": "no-store", "Content-Security-Policy": csp });
+    } catch (error) {
+      return productionCheckoutPage(req, res, productCode, { error: error.message, values: body, status: 400 });
+    }
+  }
   if (pathname === "/admin/orders/test") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
     try {
@@ -2777,6 +2895,15 @@ async function router(req, res) {
     if (req.method === "POST") return await handlePost(req, res, pathname);
 
     if (pathname === "/") return redirect(res, "/admin/login");
+    const publicCheckoutMatch = pathname.match(/^\/checkout\/([A-Za-z0-9_-]+)$/);
+    if (publicCheckoutMatch) {
+      return productionCheckoutPage(req, res, publicCheckoutMatch[1], {
+        values: {
+          offer_code: url.searchParams.get("offer") || "trial_1",
+          sharer_code: url.searchParams.get("ref") || ""
+        }
+      });
+    }
     const passwordChangedMessage = url.searchParams.get("passwordChanged") ? "密碼已更新，請使用新密碼重新登入。" : "";
     if (pathname === "/admin/login") return send(res, 200, loginPage("admin", passwordChangedMessage));
     if (pathname === "/store/login") return send(res, 200, loginPage("store", passwordChangedMessage));

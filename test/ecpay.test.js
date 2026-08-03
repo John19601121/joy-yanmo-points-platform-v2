@@ -76,3 +76,60 @@ test("checkout parameters keep server notification and browser result URLs separ
   assert.equal(parameters.TotalAmount, "600");
   assert.equal(ecpay.verifyCheckMacValue(parameters, config), true);
 });
+
+test("production credentials stay isolated and require every live-collection lock", () => {
+  const shared = {
+    ECPAY_MODE: "production",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "true",
+    ECPAY_MERCHANT_ID: "3002607",
+    ECPAY_HASH_KEY: "stage-key",
+    ECPAY_HASH_IV: "stage-iv",
+    APP_BASE_URL: "https://example.test"
+  };
+  const locked = ecpay.paymentConfig(shared);
+  assert.equal(locked.hashKey, "production-key");
+  assert.equal(locked.hashIv, "production-iv");
+  assert.equal(locked.productionEnabled, false);
+  assert.throws(() => ecpay.assertProductionCheckoutAllowed(locked), /not configured or approved/);
+
+  const enabled = ecpay.paymentConfig({ ...shared, ECPAY_PRODUCTION_ENABLED: "true" });
+  assert.equal(enabled.productionEnabled, true);
+  assert.doesNotThrow(() => ecpay.assertProductionCheckoutAllowed(enabled));
+  assert.equal(
+    ecpay.paymentConfigForMerchantId("3222651", { ...shared, ECPAY_PRODUCTION_ENABLED: "true" }).merchantId,
+    "3222651"
+  );
+
+  const wrongMerchant = ecpay.paymentConfig({
+    ...shared,
+    ECPAY_PRODUCTION_ENABLED: "true",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3002607"
+  });
+  assert.equal(wrongMerchant.productionEnabled, false);
+  assert.throws(() => ecpay.assertProductionCheckoutAllowed(wrongMerchant), /not configured or approved/);
+});
+
+test("production checkout parameters are signed only with production configuration", () => {
+  const config = ecpay.paymentConfig({
+    ECPAY_MODE: "production",
+    ECPAY_PRODUCTION_ENABLED: "true",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "true",
+    APP_BASE_URL: "https://example.test"
+  });
+  const order = { order_no: "LT2608031200000001", total_amount: 265 };
+  const item = { product_name: "菱烏金炭皂體驗組", quantity: 1 };
+  const parameters = ecpay.buildCheckoutParameters(order, item, config, new Date("2026-08-03T12:00:00Z"));
+  assert.equal(parameters.MerchantID, "3222651");
+  assert.equal(parameters.TotalAmount, "265");
+  assert.equal(parameters.CustomField2, "LT_PRODUCTION");
+  assert.equal(ecpay.checkoutGatewayUrl(config.mode), ecpay.PRODUCTION_GATEWAY_URL);
+  assert.equal(ecpay.verifyCheckMacValue(parameters, config), true);
+  assert.equal(ecpay.verifyCheckMacValue(parameters, { hashKey: "stage-key", hashIv: "stage-iv" }), false);
+});

@@ -125,7 +125,7 @@ INITIAL_ADMIN_NAME=總部管理員名稱
 
 會員啟用信使用 Resend HTTPS API。正式啟用前須另行核准並在部署環境設定 `APP_BASE_URL`、`RESEND_API_KEY`、`ACTIVATION_EMAIL_FROM` 與 `ACTIVATION_TOKEN_TTL_MINUTES`；API Key 不得寫入 Repository。正式 `APP_BASE_URL` 必須使用 HTTPS。自動測試注入假傳輸，不寄送真實 Email。
 
-## 訂單中心與綠界測試環境
+## 訂單中心與綠界環境
 
 Render 核心平台已準備下列「預設關閉」能力：
 
@@ -135,11 +135,11 @@ Render 核心平台已準備下列「預設關閉」能力：
 - `ReturnURL` 伺服器通知與 `OrderResultURL` 消費者返回頁分離
 - CheckMacValue、MerchantID、訂單金額與測試環境驗證
 - 重複回傳冪等處理
-- 付款成功後建立五方分配快照
+- 付款成功後建立完整分配快照
 - 龍捲風通知中心付款測試通知
 
-正式金流、真實扣款與正式退款均未啟用。測試環境的 MerchantID、HashKey、HashIV
-只可設定在 Render Environment Variables，不得寫入 Repository。環境變數預設如下：
+正式金流、真實扣款與正式退款均未啟用。測試與正式環境的 MerchantID、HashKey、HashIV
+使用不同欄位，且只可設定在 Render Environment Variables，不得寫入 Repository。環境變數預設如下：
 
 ```text
 ECPAY_MODE=disabled
@@ -150,11 +150,29 @@ ECPAY_HASH_IV=
 ECPAY_CREDIT_ENABLED=false
 ECPAY_ATM_ENABLED=false
 ECPAY_CVS_ENABLED=false
+ECPAY_PRODUCTION_ENABLED=false
+ECPAY_PRODUCTION_MERCHANT_ID=
+ECPAY_PRODUCTION_HASH_KEY=
+ECPAY_PRODUCTION_HASH_IV=
+ECPAY_PRODUCTION_CREDIT_ENABLED=false
+ECPAY_PRODUCTION_ATM_ENABLED=false
+ECPAY_PRODUCTION_CVS_ENABLED=false
 LINE_WEBHOOK_URL=
 ```
 
 只有在另行核准測試付款後，才可將 `ECPAY_MODE=stage`、
-`ECPAY_STAGE_ENABLED=true` 與 `ECPAY_CREDIT_ENABLED=true`。本版程式會拒絕
-`ECPAY_MODE=production`，避免誤啟用正式金流。
+`ECPAY_STAGE_ENABLED=true` 與 `ECPAY_CREDIT_ENABLED=true`。
 
-本階段仍不包含正式金流、正式退款、LT Token 發放或完整銀行帳號儲存。
+正式付款即使程式已準備完成，仍須同時滿足下列條件才會開放：
+
+- `ECPAY_MODE=production`
+- `ECPAY_PRODUCTION_ENABLED=true`
+- `ECPAY_PRODUCTION_MERCHANT_ID=3222651`
+- 正式 `ECPAY_PRODUCTION_HASH_KEY` 與 `ECPAY_PRODUCTION_HASH_IV` 均已設定
+- `ECPAY_PRODUCTION_CREDIT_ENABLED=true`
+
+任一條件不成立，`/checkout/SOAP001` 會顯示「正式付款尚未開放」，且不會建立綠界正式付款。
+`SOAP001` 正式方案以伺服器資料庫為準：體驗組 NT$200＋運費 NT$65＝NT$265，另含買5送1、
+買10送3與買20送10。運費不列入商品分潤；付款成功後才依 PR #7 的推薦與收益架構建立分配快照。
+
+本階段仍不包含正式退款、LT Token 發放或完整銀行帳號儲存。
