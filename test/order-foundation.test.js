@@ -54,7 +54,34 @@ function signedCallback(order, overrides = {}) {
     ...overrides
   };
   return {
-    config: { ...credentials, mode: "stage", stageEnabled: true },
+    config: { ...credentials, mode: "stage", stageEnabled: true, callbackEnabled: true },
+    payload: { ...payload, CheckMacValue: ecpay.createCheckMacValue(payload, credentials) }
+  };
+}
+
+function signedProductionCallback(order, overrides = {}) {
+  const credentials = { merchantId: "3222651", hashKey: "production-key", hashIv: "production-iv" };
+  const payload = {
+    MerchantID: credentials.merchantId,
+    MerchantTradeNo: order.order_no,
+    TradeNo: "2608031234567890",
+    TradeAmt: String(order.total_amount),
+    RtnCode: "1",
+    RtnMsg: "Succeeded",
+    PaymentDate: "2026/08/03 20:00:00",
+    PaymentType: "Credit_CreditCard",
+    SimulatePaid: "0",
+    ...overrides
+  };
+  return {
+    config: {
+      ...credentials,
+      mode: "production",
+      productionEnabled: true,
+      productionMerchantApproved: true,
+      callbackEnabled: true,
+      creditEnabled: true
+    },
     payload: { ...payload, CheckMacValue: ecpay.createCheckMacValue(payload, credentials) }
   };
 }
@@ -181,5 +208,178 @@ test("unassigned sharer allocation remains visible without inventing a beneficia
   assert.equal(allocation.amount, 120);
   assert.equal(allocation.beneficiary_member_id, null);
   assert.equal(allocation.status, "unassigned");
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production trial offer snapshots NT$200 merchandise plus NT$65 shipping without allocating shipping", () => {
+  const { db, directory } = database();
+  const sharer = addActiveMember(db);
+  const created = foundation.createProductionOrder(db, {
+    productCode: "SOAP001",
+    offerCode: "trial_1",
+    buyerName: "正式測試買家",
+    buyerEmail: "buyer@example.test",
+    buyerPhone: "0911000000",
+    receiverName: "正式測試收件人",
+    receiverPhone: "0911000000",
+    shippingPostalCode: "104",
+    shippingAddress: "台北市中山區測試路1號",
+    sharerCode: sharer.member_code,
+    checkoutToken: "production-checkout-token-00000001"
+  });
+  assert.equal(created.order.environment, "production");
+  assert.equal(created.order.is_test, 0);
+  assert.equal(created.order.subtotal_amount, 200);
+  assert.equal(created.order.shipping_amount, 65);
+  assert.equal(created.order.total_amount, 265);
+  assert.equal(created.item.line_total, 200);
+  assert.equal(created.item.paid_quantity, 1);
+  assert.equal(created.item.bonus_quantity, 0);
+
+  const callback = signedProductionCallback(created.order);
+  foundation.applyEcpayCallback(db, callback.payload, callback.config);
+  const allocations = db.prepare("SELECT role, amount FROM order_allocations WHERE order_id = ?").all(created.order.id);
+  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 200);
+  assert.equal(db.prepare("SELECT payment_status FROM orders WHERE id = ?").get(created.order.id).payment_status, "paid");
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production checkout keeps PR #7 referral and product-introducer snapshots", () => {
+  const { db, directory } = database();
+  const buyer = addActiveMember(db, "11");
+  const sharer = addActiveMember(db, "12");
+  const referrer = addActiveMember(db, "13");
+  const introducer = addActiveMember(db, "14");
+  const productId = db.prepare("SELECT id FROM products WHERE product_code = 'SOAP001'").get().id;
+  db.prepare(`INSERT INTO member_referrals (member_id, referrer_member_id, source)
+    VALUES (?, ?, 'test')`).run(buyer.id, referrer.id);
+  db.prepare(`INSERT INTO product_referrals (product_id, introducer_member_id)
+    VALUES (?, ?)`).run(productId, introducer.id);
+
+  const created = foundation.createProductionOrder(db, {
+    buyerMemberCode: buyer.member_code,
+    buyerName: "正式會員買家",
+    buyerEmail: "buyer11@example.test",
+    buyerPhone: "0911000011",
+    receiverName: "正式會員買家",
+    receiverPhone: "0911000011",
+    shippingAddress: "台北市中山區測試路11號",
+    sharerCode: sharer.member_code,
+    checkoutToken: "production-checkout-token-00000011"
+  });
+  assert.equal(created.order.referrer_member_id_snapshot, referrer.id);
+  assert.equal(created.item.product_introducer_member_id_snapshot, introducer.id);
+  foundation.applyEcpayCallback(db, signedProductionCallback(created.order).payload, signedProductionCallback(created.order).config);
+  const allocations = db.prepare("SELECT role, amount, beneficiary_member_id FROM order_allocations WHERE order_id = ?").all(created.order.id);
+  assert.equal(allocations.reduce((sum, row) => sum + row.amount, 0), 200);
+  assert.equal(allocations.find((row) => row.role === "member_referral").beneficiary_member_id, referrer.id);
+  assert.equal(allocations.find((row) => row.role === "product_introducer").beneficiary_member_id, introducer.id);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production checkout rejects email and phone belonging to different active members", () => {
+  const { db, directory } = database();
+  addActiveMember(db, "21");
+  addActiveMember(db, "22");
+  assert.throws(() => foundation.createProductionOrder(db, {
+    buyerName: "身分衝突測試",
+    buyerEmail: "21@example.test",
+    buyerPhone: "0912345622",
+    receiverName: "身分衝突測試",
+    receiverPhone: "0912345622",
+    shippingAddress: "台北市中山區測試路21號",
+    checkoutToken: "production-checkout-token-identity-conflict"
+  }), /email and phone belong to different active members/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM orders WHERE environment = 'production'").get().count, 0);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("a pending Production order still settles after new collection is disabled", () => {
+  const { db, directory } = database();
+  const created = foundation.createProductionOrder(db, {
+    buyerName: "正式回傳測試",
+    buyerEmail: "callback@example.test",
+    buyerPhone: "0911000023",
+    receiverName: "正式回傳測試",
+    receiverPhone: "0911000023",
+    shippingAddress: "台北市中山區測試路23號",
+    checkoutToken: "production-checkout-token-disabled-callback"
+  });
+  const signed = signedProductionCallback(created.order);
+  const callbackConfig = ecpay.paymentConfigForMerchantId("3222651", {
+    ECPAY_MODE: "production",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "false"
+  });
+  const result = foundation.applyEcpayCallback(db, signed.payload, callbackConfig);
+  assert.equal(result.paid, true);
+  assert.equal(result.order.payment_status, "paid");
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM order_allocations WHERE order_id = ?").get(created.order.id).count, 5);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("a pending Stage order still settles after Production mode is selected", () => {
+  const { db, directory } = database();
+  const created = foundation.createStageTestOrder(db);
+  const signed = signedCallback(created.order);
+  const callbackConfig = ecpay.paymentConfigForMerchantId("test-merchant", {
+    ECPAY_MODE: "production",
+    ECPAY_STAGE_ENABLED: "false",
+    ECPAY_MERCHANT_ID: "test-merchant",
+    ECPAY_HASH_KEY: "test-key",
+    ECPAY_HASH_IV: "test-iv",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv"
+  });
+  const result = foundation.applyEcpayCallback(db, signed.payload, callbackConfig);
+  assert.equal(callbackConfig.mode, "stage");
+  assert.equal(result.paid, true);
+  assert.equal(result.order.payment_status, "paid");
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production callback rejects simulated payment and leaves order pending", () => {
+  const { db, directory } = database();
+  const created = foundation.createProductionOrder(db, {
+    buyerName: "正式測試買家",
+    buyerEmail: "buyer@example.test",
+    buyerPhone: "0911000000",
+    receiverName: "正式測試收件人",
+    receiverPhone: "0911000000",
+    shippingAddress: "台北市中山區測試路1號",
+    checkoutToken: "production-checkout-token-00000002"
+  });
+  const callback = signedProductionCallback(created.order, { SimulatePaid: "1" });
+  assert.throws(
+    () => foundation.applyEcpayCallback(db, callback.payload, callback.config),
+    /Simulated.*production/
+  );
+  assert.equal(db.prepare("SELECT payment_status FROM orders WHERE id = ?").get(created.order.id).payment_status, "pending");
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM order_allocations WHERE order_id = ?").get(created.order.id).count, 0);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("repeated production checkout token reuses the pending order instead of duplicating it", () => {
+  const { db, directory } = database();
+  const input = {
+    buyerName: "防重送測試買家",
+    buyerEmail: "dedupe@example.test",
+    buyerPhone: "0911000001",
+    receiverName: "防重送測試收件人",
+    receiverPhone: "0911000001",
+    shippingAddress: "台北市中山區測試路二號",
+    checkoutToken: "production-checkout-token-00000003"
+  };
+  const first = foundation.createProductionOrder(db, input);
+  const second = foundation.createProductionOrder(db, input);
+  assert.equal(first.reused, undefined);
+  assert.equal(second.reused, true);
+  assert.equal(second.order.id, first.order.id);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM orders WHERE environment = 'production'").get().count, 1);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
