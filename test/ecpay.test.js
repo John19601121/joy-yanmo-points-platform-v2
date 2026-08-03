@@ -113,6 +113,44 @@ test("production credentials stay isolated and require every live-collection loc
   assert.throws(() => ecpay.assertProductionCheckoutAllowed(wrongMerchant), /not configured or approved/);
 });
 
+test("callback credentials remain available after new Production collection is disabled", () => {
+  const environment = {
+    ECPAY_MODE: "production",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "false"
+  };
+  const checkout = ecpay.paymentConfig(environment);
+  assert.equal(checkout.productionEnabled, false);
+  assert.throws(() => ecpay.assertProductionCheckoutAllowed(checkout), /not configured or approved/);
+
+  const callback = ecpay.paymentConfigForMerchantId("3222651", environment);
+  assert.equal(callback.mode, "production");
+  assert.equal(callback.callbackEnabled, true);
+  assert.doesNotThrow(() => ecpay.assertCallbackAllowed(callback));
+});
+
+test("unfinished Stage callbacks remain identifiable after selecting Production mode", () => {
+  const environment = {
+    ECPAY_MODE: "production",
+    ECPAY_STAGE_ENABLED: "false",
+    ECPAY_MERCHANT_ID: "3002607",
+    ECPAY_HASH_KEY: "stage-key",
+    ECPAY_HASH_IV: "stage-iv",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv"
+  };
+  const callback = ecpay.paymentConfigForMerchantId("3002607", environment);
+  assert.equal(callback.mode, "stage");
+  assert.equal(callback.stageEnabled, false);
+  assert.equal(callback.callbackEnabled, true);
+  assert.doesNotThrow(() => ecpay.assertCallbackAllowed(callback));
+});
+
 test("production checkout parameters are signed only with production configuration", () => {
   const config = ecpay.paymentConfig({
     ECPAY_MODE: "production",

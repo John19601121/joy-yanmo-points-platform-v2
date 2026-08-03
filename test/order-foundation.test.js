@@ -54,7 +54,7 @@ function signedCallback(order, overrides = {}) {
     ...overrides
   };
   return {
-    config: { ...credentials, mode: "stage", stageEnabled: true },
+    config: { ...credentials, mode: "stage", stageEnabled: true, callbackEnabled: true },
     payload: { ...payload, CheckMacValue: ecpay.createCheckMacValue(payload, credentials) }
   };
 }
@@ -79,6 +79,7 @@ function signedProductionCallback(order, overrides = {}) {
       mode: "production",
       productionEnabled: true,
       productionMerchantApproved: true,
+      callbackEnabled: true,
       creditEnabled: true
     },
     payload: { ...payload, CheckMacValue: ecpay.createCheckMacValue(payload, credentials) }
@@ -273,6 +274,72 @@ test("production checkout keeps PR #7 referral and product-introducer snapshots"
   assert.equal(allocations.reduce((sum, row) => sum + row.amount, 0), 200);
   assert.equal(allocations.find((row) => row.role === "member_referral").beneficiary_member_id, referrer.id);
   assert.equal(allocations.find((row) => row.role === "product_introducer").beneficiary_member_id, introducer.id);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production checkout rejects email and phone belonging to different active members", () => {
+  const { db, directory } = database();
+  addActiveMember(db, "21");
+  addActiveMember(db, "22");
+  assert.throws(() => foundation.createProductionOrder(db, {
+    buyerName: "身分衝突測試",
+    buyerEmail: "21@example.test",
+    buyerPhone: "0912345622",
+    receiverName: "身分衝突測試",
+    receiverPhone: "0912345622",
+    shippingAddress: "台北市中山區測試路21號",
+    checkoutToken: "production-checkout-token-identity-conflict"
+  }), /email and phone belong to different active members/);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM orders WHERE environment = 'production'").get().count, 0);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("a pending Production order still settles after new collection is disabled", () => {
+  const { db, directory } = database();
+  const created = foundation.createProductionOrder(db, {
+    buyerName: "正式回傳測試",
+    buyerEmail: "callback@example.test",
+    buyerPhone: "0911000023",
+    receiverName: "正式回傳測試",
+    receiverPhone: "0911000023",
+    shippingAddress: "台北市中山區測試路23號",
+    checkoutToken: "production-checkout-token-disabled-callback"
+  });
+  const signed = signedProductionCallback(created.order);
+  const callbackConfig = ecpay.paymentConfigForMerchantId("3222651", {
+    ECPAY_MODE: "production",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "false"
+  });
+  const result = foundation.applyEcpayCallback(db, signed.payload, callbackConfig);
+  assert.equal(result.paid, true);
+  assert.equal(result.order.payment_status, "paid");
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM order_allocations WHERE order_id = ?").get(created.order.id).count, 5);
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("a pending Stage order still settles after Production mode is selected", () => {
+  const { db, directory } = database();
+  const created = foundation.createStageTestOrder(db);
+  const signed = signedCallback(created.order);
+  const callbackConfig = ecpay.paymentConfigForMerchantId("test-merchant", {
+    ECPAY_MODE: "production",
+    ECPAY_STAGE_ENABLED: "false",
+    ECPAY_MERCHANT_ID: "test-merchant",
+    ECPAY_HASH_KEY: "test-key",
+    ECPAY_HASH_IV: "test-iv",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_MERCHANT_ID: "3222651",
+    ECPAY_PRODUCTION_HASH_KEY: "production-key",
+    ECPAY_PRODUCTION_HASH_IV: "production-iv"
+  });
+  const result = foundation.applyEcpayCallback(db, signed.payload, callbackConfig);
+  assert.equal(callbackConfig.mode, "stage");
+  assert.equal(result.paid, true);
+  assert.equal(result.order.payment_status, "paid");
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 

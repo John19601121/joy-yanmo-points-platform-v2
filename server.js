@@ -1765,7 +1765,7 @@ async function handleEcpayOrderResult(req, res) {
   const payload = await readBody(req);
   const config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
   const valid = Boolean(config)
-    && (config.stageEnabled || config.productionEnabled)
+    && config.callbackEnabled
     && String(payload.MerchantID || "") === config.merchantId
     && ecpay.verifyCheckMacValue(payload, config);
   const orderNo = valid ? String(payload.MerchantTradeNo || "") : "";
