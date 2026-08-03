@@ -10,7 +10,7 @@ const activationEmail = require("./lib/activation-email");
 const ecpay = require("./lib/ecpay");
 const orderFoundation = require("./lib/order-foundation");
 const notificationCenter = require("./lib/notification-center");
-const referralSharing = require("./lib/referral-sharing");
+const sharingFoundation = require("./lib/sharing-foundation");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -38,12 +38,6 @@ const ACTIVATION_TOKEN_TTL_MINUTES = Number.isFinite(configuredActivationTtl)
   ? Math.max(15, configuredActivationTtl)
   : 1440;
 const ACTIVATION_EMAIL_EVENTS = ["activation_email_requested"];
-
-function appBaseUrl(req = null) {
-  const configured = String(process.env.APP_BASE_URL || "").trim().replace(/\/+$/, "");
-  if (configured) return configured;
-  return req ? `${COOKIE_SECURE ? "https" : "http"}://${req.headers.host}` : `http://${HOST}:${PORT}`;
-}
 
 if (isCloudinaryConfigured()) {
   cloudinary.config({
@@ -647,7 +641,7 @@ function memberStats(memberId) {
 function nav(user) {
   if (!user) return "";
   const links = user.role === "admin"
-    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/members", "會員列表"], ["/admin/events", "活動分享"], ["/admin/mall", "商城"], ["/admin/orders", "訂單中心"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
+    ? [["/admin/dashboard", "儀表板"], ["/admin/stores", "分店列表"], ["/admin/stores/new", "新增分店"], ["/admin/members", "會員列表"], ["/admin/sharing", "分享與分潤"], ["/admin/mall", "商城"], ["/admin/orders", "訂單中心"], ["/admin/media", "媒體中心"], ["/admin/reports", "報表匯出"], ["/admin/manager-requests", "管理員申請"]]
     : user.role === "store"
       ? [["/store/dashboard", "儀表板"], ["/store/members", "會員列表"], ["/store/members/new", "新增會員"], ["/store/cross-store", "跨店扣點"], ["/store/deductions", "扣點要求"], ["/store/mall", "商城"], ["/store/reports", "報表匯出"], ["/store/manager-requests", "管理員申請"]]
       : [["/member/dashboard", "會員中心"], ["/member/mall", "商城"], ["/member/share-center", "我的成交中心"]];
@@ -725,7 +719,6 @@ function memberRegistrationPage(error = "", values = {}, completed = false) {
       <p class="muted">完成資料後，系統會建立待啟用帳號。</p>
       ${error ? `<div class="notice">${escapeHtml(error)}</div>` : ""}
       <form class="stack" method="post" action="/member/register">
-        <input type="hidden" name="attribution_token" value="${escapeHtml(values.attribution_token || "")}">
         <div class="field"><label>姓名</label><input name="name" maxlength="80" value="${escapeHtml(values.name || "")}" required autofocus></div>
         <div class="field"><label>Email</label><input name="email" type="email" maxlength="254" autocomplete="email" value="${escapeHtml(values.email || "")}" required></div>
         <div class="field"><label>手機</label><input name="phone" inputmode="tel" maxlength="20" autocomplete="tel" placeholder="0912345678" value="${escapeHtml(values.phone || "")}" required></div>
@@ -1041,160 +1034,20 @@ function adminStores(req, res, user) {
 
 function adminMembers(req, res, user) {
   const rows = db.prepare(`
-    SELECT m.id, m.member_code, m.name, m.email, m.phone, s.store_name,
-      referrer.member_code AS referrer_code, referrer.name AS referrer_name,
+    SELECT m.member_code, m.name, m.email, m.phone, s.store_name,
       COALESCE(SUM(CASE WHEN pt.type = 'purchase' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS purchase_points,
       COALESCE(SUM(CASE WHEN pt.type = 'gift' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS gift_points,
       COALESCE(SUM(CASE WHEN pt.type = 'consume' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS consume_points
     FROM members m
     LEFT JOIN stores s ON s.id = m.store_id
     LEFT JOIN point_transactions pt ON pt.member_id = m.id
-    LEFT JOIN member_referrals referral ON referral.member_id = m.id AND referral.status = 'active'
-    LEFT JOIN members referrer ON referrer.id = referral.referrer_member_id
     GROUP BY m.id
     ORDER BY m.id DESC
   `).all();
-  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>永久推薦人</th><th>電話</th><th>所屬分店</th><th>購買</th><th>贈予</th><th>剩餘</th><th>操作</th></tr></thead><tbody>${rows.map((m) => `
-    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${m.referrer_code ? `${escapeHtml(m.referrer_name)}<br><span class="muted">${escapeHtml(m.referrer_code)}</span>` : "尚未綁定"}</td><td>${escapeHtml(m.phone)}</td><td>${escapeHtml(m.store_name || "")}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td><td><a class="button secondary" href="/admin/members/${m.id}">推薦關係</a></td></tr>
+  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>電話</th><th>所屬分店</th><th>購買</th><th>贈予</th><th>剩餘</th></tr></thead><tbody>${rows.map((m) => `
+    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${escapeHtml(m.store_name || "")}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td></tr>
   `).join("")}</tbody></table>` : `<div class="empty">尚無會員。</div>`;
   send(res, 200, page("會員列表", table, user));
-}
-
-function adminMemberReferralPage(req, res, user, memberId, message = "") {
-  const member = db.prepare(`SELECT m.*, s.store_name, active_referral.referrer_member_id,
-      referrer.member_code AS referrer_code, referrer.name AS referrer_name
-    FROM members m
-    LEFT JOIN stores s ON s.id = m.store_id
-    LEFT JOIN member_referrals active_referral ON active_referral.member_id = m.id AND active_referral.status = 'active'
-    LEFT JOIN members referrer ON referrer.id = active_referral.referrer_member_id
-    WHERE m.id = ?`).get(memberId);
-  if (!member) return send(res, 404, page("找不到會員", `<div class="empty">找不到指定會員。</div>`, user));
-  const history = db.prepare(`SELECT referral.*, referrer.member_code, referrer.name AS referrer_name,
-      actor.name AS actor_name
-    FROM member_referrals referral
-    JOIN members referrer ON referrer.id = referral.referrer_member_id
-    LEFT JOIN users actor ON actor.id = referral.created_by_user_id
-    WHERE referral.member_id = ?
-    ORDER BY referral.id DESC`).all(member.id);
-  const historyHtml = history.length ? `<table class="table"><thead><tr><th>推薦人</th><th>來源</th><th>狀態</th><th>變更原因</th><th>操作者</th><th>建立／結束</th></tr></thead><tbody>${history.map((row) => `
-    <tr><td>${escapeHtml(row.referrer_name)}<br><span class="muted">${escapeHtml(row.member_code)}</span></td><td>${escapeHtml(row.source)}</td><td><span class="badge">${row.status === "active" ? "目前有效" : "已被取代"}</span></td><td>${escapeHtml(row.change_reason || "")}</td><td>${escapeHtml(row.actor_name || "系統")}</td><td>${escapeHtml(row.created_at)}${row.ended_at ? `<br><span class="muted">${escapeHtml(row.ended_at)}</span>` : ""}</td></tr>
-  `).join("")}</tbody></table>` : `<div class="empty">尚未建立推薦關係。</div>`;
-  send(res, 200, page("會員推薦關係", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-    <div class="grid split">
-      <section class="panel">
-        <h2>${escapeHtml(member.name)}</h2>
-        <p>會員編號：<b>${escapeHtml(member.member_code)}</b></p>
-        <p>${escapeHtml(member.email)}｜${escapeHtml(member.phone)}</p>
-        <p>目前永久推薦人：<b>${member.referrer_code ? `${escapeHtml(member.referrer_name)}（${escapeHtml(member.referrer_code)}）` : "尚未綁定"}</b></p>
-        <p class="muted">點擊其他商品或活動分享連結不會改綁；只有總部管理員可由右側人工更換。</p>
-      </section>
-      <section class="panel">
-        <h2>管理員更換推薦人</h2>
-        <form class="stack" method="post" action="/admin/members/${member.id}/referral">
-          <div class="field"><label>新推薦人會員編號</label><input name="referrer_code" maxlength="32" required></div>
-          <div class="field"><label>變更原因（必填，永久保存）</label><textarea name="reason" maxlength="300" required></textarea></div>
-          <button class="button">確認更換推薦關係</button>
-        </form>
-      </section>
-    </div>
-    <section class="panel" style="margin-top:16px"><h2>完整變更紀錄</h2>${historyHtml}</section>`, user), { "Cache-Control": "no-store" });
-}
-
-function adminEventsPage(req, res, user, message = "") {
-  const events = db.prepare(`SELECT event.*, COUNT(registration.id) AS registration_count
-    FROM events event
-    LEFT JOIN event_registrations registration ON registration.event_id = event.id
-    GROUP BY event.id
-    ORDER BY event.id DESC`).all();
-  const eventRows = events.length ? `<table class="table"><thead><tr><th>活動</th><th>日期</th><th>報名數</th><th>狀態</th><th>分享入口</th></tr></thead><tbody>${events.map((event) => `
-    <tr><td><b>${escapeHtml(event.name)}</b><br><span class="muted">${escapeHtml(event.event_code)}</span></td><td>${escapeHtml(event.starts_at || "未設定")}${event.ends_at ? ` – ${escapeHtml(event.ends_at)}` : ""}</td><td>${event.registration_count}</td><td><span class="badge">${event.is_active ? "開放" : "停用"}</span></td><td><code>/s/event/${escapeHtml(event.event_code)}?ref=會員編號</code></td></tr>
-  `).join("")}</tbody></table>` : `<div class="empty">尚未建立活動。</div>`;
-  send(res, 200, page("活動分享", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-    <div class="grid split">
-      <section class="panel">
-        <h2>活動與30天歸屬</h2>
-        <p class="muted">會員分享活動連結後，完成報名者會暫時歸屬該分享會員30天；既有永久推薦人完全不變。</p>
-        ${eventRows}
-      </section>
-      <section class="panel">
-        <h2>新增活動</h2>
-        <form class="stack" method="post" action="/admin/events">
-          <div class="field"><label>活動代碼</label><input name="event_code" pattern="[A-Za-z0-9_-]{2,40}" maxlength="40" required></div>
-          <div class="field"><label>活動名稱</label><input name="name" maxlength="120" required></div>
-          <div class="field"><label>開始時間</label><input name="starts_at" type="datetime-local"></div>
-          <div class="field"><label>結束時間</label><input name="ends_at" type="datetime-local"></div>
-          <div class="field"><label>外部報名網址（選填）</label><input name="registration_url" type="url" placeholder="留空使用平台內建報名表"></div>
-          <button class="button">建立活動</button>
-        </form>
-      </section>
-    </div>`, user), { "Cache-Control": "no-store" });
-}
-
-function eventRegistrationPage(res, event, attributionToken = "", message = "", completed = false) {
-  if (completed) {
-    return send(res, 201, page("活動報名完成", `<div class="login"><section class="login-card">
-      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>活動報名</span></div></div>
-      <h1>報名完成</h1><div class="notice">${escapeHtml(message || "您的活動報名資料已保存。")}</div>
-      <p><a class="button secondary" href="/member/login">會員登入</a></p>
-    </section><section class="hero"></section></div>`), { "Cache-Control": "no-store" });
-  }
-  return send(res, 200, page(event.name, `<div class="login"><section class="login-card">
-    <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交</b><span>活動報名</span></div></div>
-    <h1>${escapeHtml(event.name)}</h1>
-    ${event.starts_at ? `<p class="muted">${escapeHtml(event.starts_at)}${event.ends_at ? ` – ${escapeHtml(event.ends_at)}` : ""}</p>` : ""}
-    ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-    <form class="stack" method="post" action="/events/${encodeURIComponent(event.event_code)}/register">
-      <input type="hidden" name="attribution_token" value="${escapeHtml(attributionToken)}">
-      <div class="field"><label>姓名</label><input name="name" maxlength="80" required></div>
-      <div class="field"><label>Email</label><input name="email" type="email" maxlength="254"></div>
-      <div class="field"><label>手機</label><input name="phone" inputmode="tel" maxlength="20"></div>
-      <button class="button">送出活動報名</button>
-    </form>
-    <p class="muted">Email或手機至少填寫一項。若您已是會員，活動分享來源不會更改原有永久推薦人。</p>
-  </section><section class="hero"></section></div>`), { "Cache-Control": "no-store" });
-}
-
-function handlePublicShare(req, res, pathname, url) {
-  const registerMatch = pathname === "/r" || pathname === "/s/register";
-  const productMatch = pathname.match(/^\/(?:p|s\/product)\/([A-Za-z0-9_-]+)$/);
-  const eventMatch = pathname.match(/^\/(?:e|s\/event)\/([A-Za-z0-9_-]+)$/);
-  if (!registerMatch && !productMatch && !eventMatch) return false;
-  const referrerCode = url.searchParams.get("r") || url.searchParams.get("ref") || "";
-  try {
-    const created = referralSharing.createShareAttribution(db, {
-      kind: registerMatch ? "registration" : productMatch ? "product" : "event",
-      referrerCode,
-      productCode: productMatch?.[1] || null,
-      eventCode: eventMatch?.[1] || null,
-      visitorKey: `${clientIp(req)}|${req.headers["user-agent"] || ""}`,
-      metadata: { path: pathname }
-    });
-    if (registerMatch) {
-      redirect(res, `/member/register?ref=${encodeURIComponent(created.referrer.member_code)}&attribution=${encodeURIComponent(created.attribution.attribution_token)}`);
-      return true;
-    }
-    if (productMatch) {
-      const destination = new URL("https://tally.so/r/1A5eO4");
-      destination.searchParams.set("product", created.product.product_code);
-      destination.searchParams.set("ref", created.referrer.member_code);
-      destination.searchParams.set("attribution", created.attribution.attribution_token);
-      redirect(res, destination.toString());
-      return true;
-    }
-    if (created.event.registration_url) {
-      const destination = new URL(created.event.registration_url);
-      destination.searchParams.set("event", created.event.event_code);
-      destination.searchParams.set("ref", created.referrer.member_code);
-      destination.searchParams.set("attribution", created.attribution.attribution_token);
-      redirect(res, destination.toString());
-      return true;
-    }
-    redirect(res, `/events/${encodeURIComponent(created.event.event_code)}/register?attribution=${encodeURIComponent(created.attribution.attribution_token)}`);
-    return true;
-  } catch (error) {
-    send(res, 400, page("分享連結無效", `<div class="empty">${escapeHtml(error.message)}</div>`));
-    return true;
-  }
 }
 
 function adminStoreDetail(req, res, user, id) {
@@ -1230,7 +1083,6 @@ function memberForm(error = "", values = {}) {
     <div class="field"><label>姓名</label><input name="name" value="${escapeHtml(values.name || "")}" required></div>
     <div class="field"><label>電話</label><input name="phone" value="${escapeHtml(values.phone || "")}" required></div>
     <div class="field"><label>Email / 會員登入帳號</label><input name="email" type="email" value="${escapeHtml(values.email || "")}" required></div>
-    <div class="field"><label>推薦人會員編號（選填）</label><input name="referral_code" maxlength="32" value="${escapeHtml(values.referral_code || "")}"></div>
     <div class="field"><label>初始密碼</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
     <button class="button">建立會員</button>
   </form>`;
@@ -1310,13 +1162,141 @@ function memberDashboard(req, res, user) {
     </div>`, user));
 }
 
+function ensureShareLink(memberId, linkType, { productId = null, eventId = null } = {}) {
+  const existing = db.prepare(`SELECT * FROM share_links
+    WHERE sharer_member_id = ? AND link_type = ?
+      AND COALESCE(product_id, 0) = COALESCE(?, 0)
+      AND COALESCE(event_id, 0) = COALESCE(?, 0)
+      AND status = 'active'
+    ORDER BY id LIMIT 1`).get(memberId, linkType, productId, eventId);
+  return existing || sharingFoundation.createShareLink(db, {
+    sharerMemberId: memberId,
+    linkType,
+    productId,
+    eventId
+  });
+}
+
+function publicBaseUrl(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  const protocol = req.headers["x-forwarded-proto"] || (COOKIE_SECURE ? "https" : "http");
+  return `${protocol}://${req.headers.host}`;
+}
+
+function eventRegistrationPage(event, shareToken = "", message = "", completed = false) {
+  return page("活動報名", `<div class="login">
+    <section class="login-card">
+      <div class="brand"><img src="/public/logo.png" alt="LT Logo"><div><b>LT 大健康成交平台</b><span>活動邀請</span></div></div>
+      <h1>${escapeHtml(event.title)}</h1>
+      <p class="muted">${escapeHtml(event.event_code)}${event.starts_at ? `｜${escapeHtml(event.starts_at)}` : ""}</p>
+      ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+      ${completed ? `<p>報名完成。若您尚未成為會員，本次邀請來源將保護30天；期間加入會員，原活動分享會員會成為您的永久推薦人。</p>`
+        : `<form class="stack" method="post" action="/events/${event.id}/register">
+          <input type="hidden" name="share_token" value="${escapeHtml(shareToken)}">
+          <div class="field"><label>姓名</label><input name="name" required maxlength="80"></div>
+          <div class="field"><label>Email</label><input name="email" type="email"></div>
+          <div class="field"><label>手機</label><input name="phone" placeholder="0912345678"></div>
+          <span class="muted">Email或手機至少填寫一項，用於辨識30天邀請保護；既有會員報名不會改變原推薦人。</span>
+          <button class="button">完成報名</button>
+        </form>`}
+    </section>
+    <section class="hero" aria-hidden="true"></section>
+  </div>`);
+}
+
+function adminSharingPage(req, res, user, message = "") {
+  sharingFoundation.expireProtections(db);
+  const members = db.prepare(`SELECT members.id, members.member_code, members.name,
+      referrer.member_code AS referrer_code, referrer.name AS referrer_name
+    FROM members
+    LEFT JOIN member_referrals referrals ON referrals.member_id = members.id AND referrals.status = 'active'
+    LEFT JOIN members referrer ON referrer.id = referrals.referrer_member_id
+    ORDER BY members.id DESC LIMIT 200`).all();
+  const products = db.prepare(`SELECT products.id, products.product_code, products.name,
+      introducer.member_code AS introducer_code, introducer.name AS introducer_name
+    FROM products
+    LEFT JOIN product_referrals referrals ON referrals.product_id = products.id AND referrals.status = 'active'
+    LEFT JOIN members introducer ON introducer.id = referrals.introducer_member_id
+    ORDER BY products.id DESC`).all();
+  const events = db.prepare(`SELECT events.*,
+      COUNT(DISTINCT registrations.id) AS registrations,
+      COUNT(DISTINCT CASE WHEN protections.status = 'active' THEN protections.id END) AS active_protections
+    FROM platform_events events
+    LEFT JOIN event_registrations registrations ON registrations.event_id = events.id
+    LEFT JOIN prospect_protections protections ON protections.event_registration_id = registrations.id
+    GROUP BY events.id ORDER BY events.id DESC`).all();
+  const protections = db.prepare(`SELECT protections.*, registrations.attendee_name,
+      members.member_code, members.name AS protected_by_name, events.title AS event_title
+    FROM prospect_protections protections
+    JOIN event_registrations registrations ON registrations.id = protections.event_registration_id
+    JOIN platform_events events ON events.id = registrations.event_id
+    JOIN members ON members.id = protections.protected_by_member_id
+    ORDER BY protections.id DESC LIMIT 100`).all();
+  const memberOptions = members.map((member) =>
+    `<option value="${member.id}">${escapeHtml(member.member_code)}｜${escapeHtml(member.name)}</option>`
+  ).join("");
+  const productOptions = products.map((product) =>
+    `<option value="${product.id}">${escapeHtml(product.product_code)}｜${escapeHtml(product.name)}</option>`
+  ).join("");
+  send(res, 200, page("分享與分潤", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+    <div class="grid split">
+      <section class="panel">
+        <h2>建立活動</h2>
+        <form class="stack" method="post" action="/admin/sharing/events">
+          <div class="field"><label>活動代碼</label><input name="event_code" required placeholder="LT-FRI-20260807"></div>
+          <div class="field"><label>活動名稱</label><input name="title" required></div>
+          <div class="field"><label>開始時間（選填）</label><input name="starts_at" type="datetime-local"></div>
+          <button class="button">建立活動</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>管理永久推薦人</h2>
+        <p class="muted">管理員更換只影響之後建立的訂單；既有訂單快照不回改。</p>
+        <form class="stack" method="post" action="/admin/sharing/referrals">
+          <div class="field"><label>被推薦會員</label><select name="member_id" required>${memberOptions}</select></div>
+          <div class="field"><label>新推薦人會員編號</label><input name="referrer_code" required></div>
+          <div class="field"><label>更換原因</label><input name="reason" required></div>
+          <button class="button">更新推薦關係</button>
+        </form>
+      </section>
+    </div>
+    <section class="panel" style="margin-top:16px">
+      <h2>商品／合作引薦人（每筆2%）</h2>
+      <form class="stack" method="post" action="/admin/sharing/product-introducers">
+        <div class="field"><label>商品</label><select name="product_id" required>${productOptions}</select></div>
+        <div class="field"><label>引薦會員編號</label><input name="introducer_code" required></div>
+        <div class="field"><label>設定原因</label><input name="reason" required></div>
+        <button class="button">設定商品引薦人</button>
+      </form>
+      <table class="table" style="margin-top:16px"><thead><tr><th>商品</th><th>目前引薦人</th></tr></thead><tbody>${products.map((product) =>
+        `<tr><td>${escapeHtml(product.product_code)}｜${escapeHtml(product.name)}</td><td>${escapeHtml(product.introducer_code || "未設定")}${product.introducer_name ? `｜${escapeHtml(product.introducer_name)}` : ""}</td></tr>`
+      ).join("")}</tbody></table>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>活動與30天保護</h2>
+      <table class="table"><thead><tr><th>活動</th><th>報名數</th><th>有效保護</th></tr></thead><tbody>${events.map((event) =>
+        `<tr><td>${escapeHtml(event.event_code)}｜${escapeHtml(event.title)}</td><td>${event.registrations}</td><td>${event.active_protections}</td></tr>`
+      ).join("")}</tbody></table>
+      ${protections.length ? `<table class="table" style="margin-top:16px"><thead><tr><th>被邀請人</th><th>分享會員</th><th>活動</th><th>狀態／到期</th></tr></thead><tbody>${protections.map((protection) =>
+        `<tr><td>${escapeHtml(protection.attendee_name)}<br><span class="muted">${escapeHtml(protection.normalized_email || protection.normalized_phone || "")}</span></td><td>${escapeHtml(protection.member_code)}｜${escapeHtml(protection.protected_by_name)}</td><td>${escapeHtml(protection.event_title)}</td><td>${escapeHtml(protection.status)}<br><span class="muted">${escapeHtml(protection.expires_at)}</span></td></tr>`
+      ).join("")}</tbody></table>` : `<div class="empty" style="margin-top:16px">尚無活動邀請保護紀錄。</div>`}
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>永久推薦關係</h2>
+      <table class="table"><thead><tr><th>會員</th><th>永久推薦人</th></tr></thead><tbody>${members.map((member) =>
+        `<tr><td>${escapeHtml(member.member_code)}｜${escapeHtml(member.name)}</td><td>${escapeHtml(member.referrer_code || "未綁定")}${member.referrer_name ? `｜${escapeHtml(member.referrer_name)}` : ""}</td></tr>`
+      ).join("")}</tbody></table>
+    </section>`, user), { "Cache-Control": "no-store" });
+}
+
 function memberShareCenter(req, res, user) {
   const member = db.prepare("SELECT * FROM members WHERE user_id = ?").get(user.id);
   if (!member) return send(res, 404, page("找不到會員資料", `<div class="empty">此帳號尚未連結會員資料。</div>`, user));
   const memberCode = member.member_code || "";
   const url = new URL(req.url, `http://${req.headers.host}`);
   const productCode = String(url.searchParams.get("product") || "").trim().toUpperCase();
-  const eventCode = String(url.searchParams.get("event") || "").trim().toUpperCase();
+  const eventId = Number(url.searchParams.get("event") || 0);
   const product = productCode ? db.prepare(`
     SELECT p.*, pt.name AS type_name, pc.name AS category_name
     FROM products p
@@ -1327,32 +1307,30 @@ function memberShareCenter(req, res, user) {
   if (productCode && !product) {
     return send(res, 404, page("找不到商品", `<div class="empty">找不到此商品，或商品尚未上架。</div><p><a class="button" href="/member/mall">返回商城</a></p>`, user));
   }
-  const selectedEvent = eventCode
-    ? db.prepare("SELECT * FROM events WHERE event_code = ? AND is_active = 1").get(eventCode)
-    : null;
-  if (eventCode && !selectedEvent) {
-    return send(res, 404, page("找不到活動", `<div class="empty">找不到此活動，或活動尚未開放。</div><p><a class="button" href="/member/share-center">返回成交中心</a></p>`, user));
+  const event = eventId ? db.prepare("SELECT * FROM platform_events WHERE id = ? AND registration_open = 1").get(eventId) : null;
+  if (eventId && !event) {
+    return send(res, 404, page("找不到活動", `<div class="empty">找不到此活動，或活動報名已關閉。</div>`, user));
   }
-  const availableEvents = db.prepare("SELECT * FROM events WHERE is_active = 1 ORDER BY starts_at, id").all();
-  const baseUrl = appBaseUrl(req);
-  const shareUrl = product
-    ? `${baseUrl}/p/${encodeURIComponent(product.product_code)}?r=${encodeURIComponent(memberCode)}`
-    : selectedEvent
-      ? `${baseUrl}/e/${encodeURIComponent(selectedEvent.event_code)}?r=${encodeURIComponent(memberCode)}`
-      : `${baseUrl}/r?r=${encodeURIComponent(memberCode)}`;
+  const link = product
+    ? ensureShareLink(member.id, "product", { productId: product.id })
+    : event
+      ? ensureShareLink(member.id, "event", { eventId: event.id })
+      : ensureShareLink(member.id, "member");
+  const shareUrl = `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
+  const activeEvents = db.prepare("SELECT * FROM platform_events WHERE registration_open = 1 ORDER BY id DESC").all();
   send(res, 200, page("我的成交中心", `<div class="panel">
-    <p class="muted">分享您的專屬連結，系統會先在核心平台驗證會員並記錄來源，再導向商品、活動或新會員註冊。</p>
+    <p class="muted">會員、商品、活動三種連結各自記錄；活動邀請不會產生商品20%分潤。</p>
     ${product ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
       <h2 style="margin-top:0">${escapeHtml(product.name)}</h2>
       <p class="muted">商品編號：${escapeHtml(product.product_code)}｜${escapeHtml(product.type_name)}${product.category_name ? ` → ${escapeHtml(product.category_name)}` : ""}</p>
       <p>${escapeHtml(product.short_description || "")}</p>
       <p><a class="button secondary" href="${escapeHtml(product.product_page_url)}" target="_blank" rel="noopener noreferrer">查看商品介紹</a></p>
-    </div>` : selectedEvent ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
-      <h2 style="margin-top:0">${escapeHtml(selectedEvent.name)}</h2>
-      <p class="muted">活動代碼：${escapeHtml(selectedEvent.event_code)}｜分享歸屬30天</p>
-      <p>完成報名後，受邀者暫時歸屬您30天；若對方已有永久推薦人，不會改綁。</p>
-    </div>` : `<div class="notice">目前產生「推薦新會員加入」連結；新會員完成註冊後將與您建立永久推薦關係。</div>`}
-    ${availableEvents.length ? `<div class="actions" style="margin-bottom:16px"><span class="muted" style="align-self:center">活動分享：</span>${availableEvents.map((event) => `<a class="button secondary" href="/member/share-center?event=${encodeURIComponent(event.event_code)}">${escapeHtml(event.name)}</a>`).join("")}</div>` : ""}
+    </div>` : ""}
+    ${event ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7"><h2>${escapeHtml(event.title)}</h2><p>完成活動報名後，對尚未成為會員者建立30天邀請保護。</p></div>` : ""}
+    <div class="actions" style="margin-bottom:16px">
+      <a class="button secondary" href="/member/share-center">分享加入會員</a>
+      ${activeEvents.map((item) => `<a class="button secondary" href="/member/share-center?event=${item.id}">分享活動：${escapeHtml(item.title)}</a>`).join("")}
+    </div>
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
     <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
     <div class="actions" style="margin-top:16px">
@@ -1617,7 +1595,6 @@ function productionCheckoutPage(req, res, productCode, {
       <form class="stack" method="post" action="/checkout/${encodeURIComponent(product.product_code)}">
         <input type="hidden" name="checkout_token" value="${escapeHtml(checkoutToken)}">
         <input type="hidden" name="sharer_code" value="${escapeHtml(values.sharer_code || "")}">
-        <input type="hidden" name="attribution_token" value="${escapeHtml(values.attribution_token || "")}">
         <div class="field"><label>購買方案</label><select name="offer_code" required>${offerOptions}</select></div>
         <div class="field"><label>訂購人姓名</label><input name="buyer_name" maxlength="80" value="${escapeHtml(values.buyer_name || "")}" required></div>
         <div class="field"><label>Email</label><input name="buyer_email" type="email" maxlength="254" value="${escapeHtml(values.buyer_email || "")}" required></div>
@@ -1644,12 +1621,9 @@ function adminOrdersPage(req, res, user, message = "") {
     WHERE config.environment = 'stage'
     ORDER BY config.id
     LIMIT 1`).get();
-  const orders = db.prepare(`SELECT orders.*, sharer.member_code AS sharer_code,
-      buyer.member_code AS buyer_code, buyer_referrer.member_code AS buyer_referrer_code
+  const orders = db.prepare(`SELECT orders.*, members.member_code AS sharer_code
     FROM orders
-    LEFT JOIN members sharer ON sharer.id = orders.sharer_member_id
-    LEFT JOIN members buyer ON buyer.id = orders.buyer_member_id
-    LEFT JOIN members buyer_referrer ON buyer_referrer.id = orders.buyer_referrer_member_id
+    LEFT JOIN members ON members.id = orders.sharer_member_id
     ORDER BY orders.id DESC
     LIMIT 100`).all();
   const distribution = testProduct ? orderFoundation.parseDistribution(testProduct.distribution_json) : null;
@@ -1668,12 +1642,11 @@ function adminOrdersPage(req, res, user, message = "") {
     ["正式收款全部條件", productionConfig.productionEnabled && productionConfig.creditEnabled]
   ];
   const orderRows = orders.length ? `<table class="table"><thead><tr>
-      <th>訂單</th><th>商品／金額</th><th>成交分享20%</th><th>永久推薦1%</th><th>付款</th><th>建立時間</th>
+      <th>訂單</th><th>商品／金額</th><th>分享歸屬</th><th>付款</th><th>建立時間</th>
     </tr></thead><tbody>${orders.map((order) => `<tr>
       <td><a href="/admin/orders/${encodeURIComponent(order.order_no)}"><b>${escapeHtml(order.order_no)}</b></a><br><span class="badge">${order.is_test ? "測試" : "正式"}</span></td>
       <td>${money(order.total_amount)} ${escapeHtml(order.currency)}<br><span class="muted">${escapeHtml(order.environment)}</span></td>
       <td>${escapeHtml(order.sharer_code || "未指定")}</td>
-      <td>${escapeHtml(order.buyer_referrer_code || (order.buyer_code ? "無推薦人" : "買家未綁會員"))}</td>
       <td><span class="badge">${escapeHtml(paymentStatusLabel(order.payment_status))}</span><br><span class="muted">${escapeHtml(order.gateway_result_message || "")}</span></td>
       <td>${escapeHtml(order.created_at)}</td>
     </tr>`).join("")}</tbody></table>` : `<div class="empty">尚無 Render 核心訂單。</div>`;
@@ -1693,9 +1666,8 @@ function adminOrdersPage(req, res, user, message = "") {
           <p class="muted">此金額不會覆寫商城售價，也不代表供應商正式核准。</p>
           <div class="actions">${Object.entries(distribution).map(([role, rate]) => `<span class="badge">${escapeHtml({ supplier: "供應商", content: "內容製作", sharer: "推薦分享", platform: "平台", bonus_pool: "獎勵池" }[role])} ${rate}%</span>`).join("")}</div>
           <form class="stack" method="post" action="/admin/orders/test" style="margin-top:16px">
-            <div class="field"><label>測試購買會員編號（可留空）</label><input name="buyer_member_code" placeholder="用於驗證永久推薦人1%"></div>
+            <div class="field"><label>測試購買會員編號（可留空）</label><input name="buyer_member_code" placeholder="用於驗證永久推薦1%"></div>
             <div class="field"><label>測試分享者會員編號（可留空）</label><input name="sharer_code" placeholder="LT20260700001"></div>
-            <div class="field"><label>分享追蹤Token（可留空）</label><input name="attribution_token" placeholder="用於驗證商品或活動分享來源"></div>
             <button class="button" ${config.stageEnabled && config.creditEnabled ? "" : "disabled"}>建立測試訂單並前往綠界</button>
           </form>` : `<div class="empty">尚未建立測試商品設定。</div>`}
       </section>
@@ -1706,44 +1678,30 @@ function adminOrdersPage(req, res, user, message = "") {
     </section>`, user), { "Cache-Control": "no-store" });
 }
 
-function adminOrderDetailPage(req, res, user, orderNo) {
+function adminOrderDetailPage(res, user, orderNo) {
   const details = orderFoundation.orderWithDetails(db, orderNo);
-  if (!details) return send(res, 404, page("找不到訂單", `<div class="empty">找不到指定訂單。</div>`, user));
-  const { order, items, allocations, events } = details;
-  const beneficiaryIds = [...new Set(allocations.map((row) => row.beneficiary_member_id).filter(Boolean))];
-  const beneficiaries = beneficiaryIds.length
-    ? Object.fromEntries(db.prepare(`SELECT id, member_code, name FROM members WHERE id IN (${beneficiaryIds.map(() => "?").join(",")})`)
-      .all(...beneficiaryIds).map((member) => [member.id, member]))
-    : {};
-  const roleLabel = {
+  if (!details) return send(res, 404, page("找不到訂單", `<div class="empty">找不到此訂單。</div>`, user));
+  const roleLabels = {
     supplier: "供應商",
-    content: "內容製作",
-    sharer: "成交分享者",
+    content: "內容製作／品牌包裝",
+    sharer: "商品成交分享者",
     platform: "平台營運",
-    member_referrer: "永久推薦人",
-    product_partner_referrer: "商品／合作引薦人",
-    bonus_pool: "獎勵池餘額"
+    member_referral: "永久推薦人",
+    product_introducer: "商品／合作引薦人",
+    bonus_pool: "獎勵池"
   };
-  const allocationRows = allocations.length ? `<table class="table"><thead><tr><th>分配角色</th><th>比例</th><th>金額</th><th>受益會員</th><th>狀態</th></tr></thead><tbody>${allocations.map((allocation) => {
-    const beneficiary = beneficiaries[allocation.beneficiary_member_id];
-    return `<tr><td>${escapeHtml(roleLabel[allocation.role] || allocation.role)}</td><td>${allocation.rate}%</td><td>NT$ ${money(allocation.amount)}</td><td>${beneficiary ? `${escapeHtml(beneficiary.name)}<br><span class="muted">${escapeHtml(beneficiary.member_code)}</span>` : allocation.status === "unassigned" ? "待歸屬" : "平台／非會員角色"}</td><td><span class="badge">${escapeHtml(allocation.status)}</span></td></tr>`;
-  }).join("")}</tbody></table>` : `<div class="empty">尚未付款，尚未建立分配快照。</div>`;
-  send(res, 200, page("訂單分潤明細", `<div class="grid split">
-    <section class="panel">
-      <h2>${escapeHtml(order.order_no)}</h2>
-      <p>買家：${escapeHtml(order.buyer_name)}${order.buyer_member_id ? `（會員）` : ""}</p>
-      <p>成交分享者20%：<b>${escapeHtml(order.sharer_name || "未指定")}</b></p>
-      <p>永久推薦人1%：<b>${escapeHtml(order.buyer_referrer_name || "無")}</b></p>
-      <p>付款：<span class="badge">${escapeHtml(paymentStatusLabel(order.payment_status))}</span></p>
-    </section>
-    <section class="panel">
-      <h2>快照原則</h2>
-      <p class="muted">推薦人、商品引薦人與分享來源都在建立訂單時固定；之後管理員修改關係，不會回溯改變本筆訂單。</p>
-      <p>商品：${items.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join("、")}</p>
-      <p>付款事件：${events.length}筆</p>
-    </section>
-  </div>
-  <section class="panel" style="margin-top:16px"><h2>完整分潤</h2>${allocationRows}</section>`, user), { "Cache-Control": "no-store" });
+  const allocations = db.prepare(`SELECT allocations.*, members.member_code, members.name
+    FROM order_allocations allocations
+    LEFT JOIN members ON members.id = allocations.beneficiary_member_id
+    WHERE allocations.order_id = ? ORDER BY allocations.id`).all(details.order.id);
+  send(res, 200, page(`訂單 ${details.order.order_no}`, `<section class="panel">
+    <p>金額：<b>NT$ ${money(details.order.total_amount)}</b>｜付款：${escapeHtml(paymentStatusLabel(details.order.payment_status))}</p>
+    <p class="muted">關係在訂單建立時快照；管理員之後更換推薦人或商品引薦人，不會改變本訂單。</p>
+    ${allocations.length ? `<table class="table"><thead><tr><th>分配角色</th><th>比例</th><th>金額</th><th>歸屬會員</th><th>狀態</th></tr></thead><tbody>${allocations.map((allocation) =>
+      `<tr><td>${escapeHtml(roleLabels[allocation.role] || allocation.role)}</td><td>${allocation.rate}%</td><td>NT$ ${money(allocation.amount)}</td><td>${escapeHtml(allocation.member_code || (allocation.role === "sharer" ? "待歸屬" : "平台內部"))}${allocation.name ? `｜${escapeHtml(allocation.name)}` : ""}</td><td>${escapeHtml(allocation.status)}</td></tr>`
+    ).join("")}</tbody></table>` : `<div class="empty">付款完成後才建立分配快照。</div>`}
+    <p><a class="button secondary" href="/admin/orders">返回訂單中心</a></p>
+  </section>`, user), { "Cache-Control": "no-store" });
 }
 
 function paymentAutoSubmitPage(order, item, parameters, gatewayUrl, user) {
@@ -2012,14 +1970,8 @@ function adminMallPage(req, res, user, error = "", values = {}) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const editCode = String(url.searchParams.get("edit") || "").trim().toUpperCase();
   const editProduct = editCode ? db.prepare("SELECT * FROM products WHERE product_code = ?").get(editCode) : null;
-  const editPartner = editProduct ? referralSharing.activeProductPartnerReferral(db, editProduct.id) : null;
   const selectedMedia = mediaAssetById(url.searchParams.get("media"));
-  const productValues = {
-    ...(editProduct || {}),
-    partner_referrer_code: editPartner?.member_code || "",
-    ...(selectedMedia ? { media_asset_id: selectedMedia.id, image_url: selectedMedia.secure_url } : {}),
-    ...values
-  };
+  const productValues = { ...(editProduct || {}), ...(selectedMedia ? { media_asset_id: selectedMedia.id, image_url: selectedMedia.secure_url } : {}), ...values };
   const notice = error || url.searchParams.get("message") || "";
   const productFormTitle = editProduct ? `修改商品：${escapeHtml(editProduct.product_code)}` : "新增商品";
   const typeRows = db.prepare("SELECT * FROM product_types ORDER BY sort_order, id").all();
@@ -2063,7 +2015,6 @@ function adminMallPage(req, res, user, error = "", values = {}) {
         ${productMediaPickerHtml(productValues)}
         <div class="field"><label>商品介紹網址</label><input name="product_page_url" value="${escapeHtml(productValues.product_page_url || "")}" placeholder="https://" required></div>
         <div class="field"><label>價格</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"></div>
-        <div class="field"><label>商品／合作引薦人會員編號（選填）</label><input name="partner_referrer_code" maxlength="32" value="${escapeHtml(productValues.partner_referrer_code || "")}"><span class="muted">設定後，每筆成交由獎勵池提撥2%給此引薦人；變更只影響新訂單。</span></div>
         <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="${productValues.sort_order ?? 0}"></div>
         <label class="actions" style="align-items:center"><input name="is_active" type="checkbox" value="1" ${String(productValues.is_active ?? 1) === "1" ? "checked" : ""}> 是否上架</label>
         <button class="button">${editProduct ? "儲存商品" : "新增商品"}</button>
@@ -2297,7 +2248,6 @@ async function handlePost(req, res, pathname) {
         shippingPostalCode: postalCode,
         shippingAddress,
         sharerCode: String(body.sharer_code || "").trim(),
-        attributionToken: String(body.attribution_token || "").trim(),
         checkoutSource: "lt-health.com.tw",
         checkoutToken: String(body.checkout_token || "").trim()
       });
@@ -2332,7 +2282,6 @@ async function handlePost(req, res, pathname) {
         productCode: "SOAP001",
         buyerMemberCode: String(body.buyer_member_code || "").trim(),
         sharerCode: String(body.sharer_code || "").trim(),
-        attributionToken: String(body.attribution_token || "").trim(),
         actorUserId: user.id
       });
       const parameters = ecpay.buildCheckoutParameters(result.order, result.item, config);
@@ -2348,66 +2297,67 @@ async function handlePost(req, res, pathname) {
       return adminOrdersPage(req, res, user, error.message);
     }
   }
-  const eventRegistrationMatch = pathname.match(/^\/events\/([A-Za-z0-9_-]+)\/register$/);
+  const eventRegistrationMatch = pathname.match(/^\/events\/(\d+)\/register$/);
   if (eventRegistrationMatch) {
-    const event = db.prepare("SELECT * FROM events WHERE event_code = ? AND is_active = 1")
-      .get(eventRegistrationMatch[1].toUpperCase());
-    if (!event) return send(res, 404, page("找不到活動", `<div class="empty">找不到此活動，或活動報名已關閉。</div>`));
+    const event = db.prepare("SELECT * FROM platform_events WHERE id = ? AND registration_open = 1").get(eventRegistrationMatch[1]);
+    if (!event) return send(res, 404, page("找不到活動", `<div class="empty">活動不存在或報名已關閉。</div>`));
     try {
-      const result = referralSharing.registerEventParticipant(db, {
-        eventCode: event.event_code,
-        name: body.name,
+      sharingFoundation.registerForEvent(db, {
+        eventId: event.id,
+        shareToken: String(body.share_token || "") || null,
+        attendeeName: body.name,
         email: body.email,
-        phone: body.phone,
-        attributionToken: body.attribution_token
+        phone: body.phone
       });
-      const attributionMessage = result.attribution
-        ? `報名已完成；本次活動分享歸屬有效至 ${result.registration.attribution_expires_at}，不影響既有永久推薦關係。`
-        : "報名已完成。";
-      return eventRegistrationPage(res, event, "", attributionMessage, true);
+      return send(res, 201, eventRegistrationPage(event, "", "", true), { "Cache-Control": "no-store" });
     } catch (error) {
-      return eventRegistrationPage(res, event, body.attribution_token, error.message);
+      return send(res, 400, eventRegistrationPage(event, body.share_token || "", error.message));
     }
   }
-  if (pathname === "/admin/events") {
+  if (pathname === "/admin/sharing/events") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
-    const eventCode = String(body.event_code || "").trim().toUpperCase();
-    const name = String(body.name || "").trim();
-    const registrationUrl = validHttpUrl(body.registration_url, false);
-    if (!/^[A-Z0-9_-]{2,40}$/.test(eventCode)) return adminEventsPage(req, res, user, "活動代碼只能使用英文、數字、底線或連字號。");
-    if (!name) return adminEventsPage(req, res, user, "請輸入活動名稱。");
-    if (registrationUrl === null) return adminEventsPage(req, res, user, "外部報名網址必須是 http 或 https。");
     try {
-      db.prepare(`INSERT INTO events
-        (event_code, name, registration_url, starts_at, ends_at, created_by_user_id)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(
-          eventCode,
-          name,
-          registrationUrl || null,
-          String(body.starts_at || "").trim() || null,
-          String(body.ends_at || "").trim() || null,
-          user.id
-        );
-      return redirect(res, "/admin/events");
+      sharingFoundation.createEvent(db, {
+        eventCode: body.event_code,
+        title: body.title,
+        startsAt: body.starts_at || null,
+        actorUserId: user.id
+      });
+      return redirect(res, "/admin/sharing");
     } catch (error) {
-      if (isUniqueConstraintError(error)) return adminEventsPage(req, res, user, "此活動代碼已存在。");
-      throw error;
+      return adminSharingPage(req, res, user, error.message);
     }
   }
-  const memberReferralMatch = pathname.match(/^\/admin\/members\/(\d+)\/referral$/);
-  if (memberReferralMatch) {
+  if (pathname === "/admin/sharing/referrals") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
-    const member = db.prepare("SELECT id FROM members WHERE id = ?").get(memberReferralMatch[1]);
-    const referrer = referralSharing.activeMemberByCode(db, body.referrer_code);
-    const reason = String(body.reason || "").trim();
-    if (!member) return send(res, 404, page("找不到會員", `<div class="empty">找不到指定會員。</div>`, user));
-    if (!referrer) return adminMemberReferralPage(req, res, user, member.id, "新推薦人會員編號不存在或尚未啟用。");
-    if (!reason) return adminMemberReferralPage(req, res, user, member.id, "管理員更換推薦人時必須填寫原因。");
+    const referrer = orderFoundation.activeMemberByCode(db, body.referrer_code);
+    if (!referrer) return adminSharingPage(req, res, user, "新推薦人會員編號無效或尚未啟用。");
     try {
-      memberFoundation.setReferral(db, member.id, referrer.id, "admin", user.id, reason.slice(0, 300));
-      return redirect(res, `/admin/members/${member.id}`);
+      memberFoundation.setReferral(
+        db,
+        Number(body.member_id),
+        referrer.id,
+        "admin",
+        user.id,
+        String(body.reason || "").trim()
+      );
+      return redirect(res, "/admin/sharing");
     } catch (error) {
-      return adminMemberReferralPage(req, res, user, member.id, error.message);
+      return adminSharingPage(req, res, user, error.message);
+    }
+  }
+  if (pathname === "/admin/sharing/product-introducers") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const introducer = orderFoundation.activeMemberByCode(db, body.introducer_code);
+    if (!introducer) return adminSharingPage(req, res, user, "商品引薦人會員編號無效或尚未啟用。");
+    try {
+      sharingFoundation.setProductIntroducer(db, Number(body.product_id), introducer.id, {
+        actorUserId: user.id,
+        reason: String(body.reason || "").trim()
+      });
+      return redirect(res, "/admin/sharing");
+    } catch (error) {
+      return adminSharingPage(req, res, user, error.message);
     }
   }
   if (pathname === "/member/register") {
@@ -2437,13 +2387,6 @@ async function handlePost(req, res, pathname) {
         referralCode: String(body.referral_code || "").trim() || null,
         activationTtlMinutes: ACTIVATION_TOKEN_TTL_MINUTES
       });
-      const registrationAttribution = referralSharing.activeAttributionByToken(db, body.attribution_token);
-      if (registrationAttribution?.kind === "registration"
-          && registrationAttribution.referrer_code === String(body.referral_code || "").trim().toUpperCase()) {
-        db.prepare(`UPDATE share_attributions
-          SET status = 'converted', converted_member_id = ?, converted_at = CURRENT_TIMESTAMP
-          WHERE id = ?`).run(registered.memberId, registrationAttribution.id);
-      }
       memberFoundation.recordActivationEmailAudit(db, {
         eventType: "activation_email_requested",
         memberId: registered.memberId,
@@ -2681,9 +2624,7 @@ async function handlePost(req, res, pathname) {
     const price = parseOptionalPrice(body.price);
     const sortOrder = Number(body.sort_order || 0);
     const isActive = body.is_active === "1" ? 1 : 0;
-    const partnerReferrerCode = String(body.partner_referrer_code || "").trim().toUpperCase();
-    const partnerReferrer = partnerReferrerCode ? referralSharing.activeMemberByCode(db, partnerReferrerCode) : null;
-    const values = { ...body, id, product_code: productCode, type_id: typeId, category_id: categoryId, media_asset_id: mediaAssetId, image_url: imageUrl || body.image_url || "", price, sort_order: sortOrder, is_active: isActive, partner_referrer_code: partnerReferrerCode };
+    const values = { ...body, id, product_code: productCode, type_id: typeId, category_id: categoryId, media_asset_id: mediaAssetId, image_url: imageUrl || body.image_url || "", price, sort_order: sortOrder, is_active: isActive };
     if (!/^[A-Z0-9_-]{2,40}$/.test(productCode)) return adminMallPage(req, res, user, "商品編號只能使用英文、數字、底線或連字號。", values);
     if (!name) return adminMallPage(req, res, user, "請輸入商品名稱。", values);
     if (!db.prepare("SELECT id FROM product_types WHERE id = ?").get(typeId)) return adminMallPage(req, res, user, "請選擇有效的商品類型。", values);
@@ -2692,9 +2633,7 @@ async function handlePost(req, res, pathname) {
     if (!productPageUrl) return adminMallPage(req, res, user, "商品介紹網址必須是 http 或 https。", values);
     if (Number.isNaN(price)) return adminMallPage(req, res, user, "價格必須是 0 或正整數，或留空顯示價格洽詢。", values);
     if (!Number.isInteger(sortOrder)) return adminMallPage(req, res, user, "顯示順序必須是整數。", values);
-    if (partnerReferrerCode && !partnerReferrer) return adminMallPage(req, res, user, "商品／合作引薦人會員編號不存在或尚未啟用。", values);
     try {
-      let savedProductId = id;
       if (id) {
         const existing = db.prepare("SELECT id FROM products WHERE id = ?").get(id);
         if (!existing) return adminMallPage(req, res, user, "找不到要修改的商品。", values);
@@ -2706,26 +2645,10 @@ async function handlePost(req, res, pathname) {
           WHERE id = ?
         `).run(productCode, name, typeId, categoryId, shortDescription, mediaAssetId, imageUrl || "", productPageUrl, price, isActive, sortOrder, id);
       } else {
-        savedProductId = db.prepare(`
+        db.prepare(`
           INSERT INTO products (product_code, name, type_id, category_id, short_description, media_asset_id, image_url, product_page_url, price, currency, payment_provider, is_active, sort_order)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'TWD', 'ecpay', ?, ?)
-          RETURNING id
-        `).get(productCode, name, typeId, categoryId, shortDescription, mediaAssetId, imageUrl || "", productPageUrl, price, isActive, sortOrder).id;
-      }
-      const currentPartner = referralSharing.activeProductPartnerReferral(db, savedProductId);
-      if (partnerReferrer && currentPartner?.referrer_member_id !== partnerReferrer.id) {
-        referralSharing.setProductPartnerReferral(db, {
-          productId: savedProductId,
-          referrerMemberId: partnerReferrer.id,
-          source: "admin",
-          actorUserId: user.id,
-          reason: id ? "管理員修改商品引薦人" : "建立商品時指定"
-        });
-      } else if (!partnerReferrer && currentPartner) {
-        referralSharing.clearProductPartnerReferral(db, {
-          productId: savedProductId,
-          actorUserId: user.id
-        });
+        `).run(productCode, name, typeId, categoryId, shortDescription, mediaAssetId, imageUrl || "", productPageUrl, price, isActive, sortOrder);
       }
       return redirect(res, "/admin/mall");
     } catch (error) {
@@ -2775,12 +2698,6 @@ async function handlePost(req, res, pathname) {
     if (emailExistsForRole(body.email, "member")) {
       return send(res, 400, page("新增會員", memberForm("此 Email 已在相同角色中使用，請更換 Email。", body), user));
     }
-    const referrer = String(body.referral_code || "").trim()
-      ? referralSharing.activeMemberByCode(db, body.referral_code)
-      : null;
-    if (body.referral_code && !referrer) {
-      return send(res, 400, page("新增會員", memberForm("推薦人會員編號不存在或尚未啟用。", body), user));
-    }
     try {
       db.exec("BEGIN");
       const newUser = db.prepare(`
@@ -2791,16 +2708,6 @@ async function handlePost(req, res, pathname) {
         INSERT INTO members (store_id, user_id, member_code, name, phone, email)
         VALUES (?, ?, ?, ?, ?, ?) RETURNING id
       `).get(user.store_id, newUser.id, generateMemberCode(), body.name, body.phone, normalizeEmail(body.email));
-      db.prepare(`INSERT INTO member_profiles
-        (member_id, normalized_email, normalized_phone, source, activation_status)
-        VALUES (?, ?, ?, 'store_registration', 'active')`)
-        .run(member.id, memberFoundation.normalizeEmail(body.email), memberFoundation.normalizePhone(body.phone));
-      if (referrer) {
-        db.prepare(`INSERT INTO member_referrals
-          (member_id, referrer_member_id, source, change_reason, created_by_user_id)
-          VALUES (?, ?, 'store_registration', '建立會員時指定', ?)`)
-          .run(member.id, referrer.id, user.id);
-      }
       db.exec("COMMIT");
       return redirect(res, `/store/members/${member.id}`);
     } catch (error) {
@@ -2984,7 +2891,6 @@ async function router(req, res) {
       if (servePublicImage(res, pathname)) return;
       return sendText(res, 404, "Not found");
     }
-    if (req.method === "GET" && handlePublicShare(req, res, pathname, url)) return;
     if (req.method === "GET" && handleExport(req, res, pathname)) return;
     if (req.method === "POST") return await handlePost(req, res, pathname);
 
@@ -2994,8 +2900,7 @@ async function router(req, res) {
       return productionCheckoutPage(req, res, publicCheckoutMatch[1], {
         values: {
           offer_code: url.searchParams.get("offer") || "trial_1",
-          sharer_code: url.searchParams.get("ref") || "",
-          attribution_token: url.searchParams.get("attribution") || ""
+          sharer_code: url.searchParams.get("ref") || ""
         }
       });
     }
@@ -3008,16 +2913,8 @@ async function router(req, res) {
         return send(res, 404, page("功能尚未開放", `<div class="empty">會員自行註冊目前尚未開放。</div>`));
       }
       return send(res, 200, memberRegistrationPage("", {
-        referral_code: url.searchParams.get("ref") || "",
-        attribution_token: url.searchParams.get("attribution") || ""
+        referral_code: String(url.searchParams.get("ref") || "").trim().toUpperCase()
       }));
-    }
-    const publicEventRegistration = pathname.match(/^\/events\/([A-Za-z0-9_-]+)\/register$/);
-    if (publicEventRegistration) {
-      const event = db.prepare("SELECT * FROM events WHERE event_code = ? AND is_active = 1")
-        .get(publicEventRegistration[1].toUpperCase());
-      if (!event) return send(res, 404, page("找不到活動", `<div class="empty">找不到此活動，或活動報名已關閉。</div>`));
-      return eventRegistrationPage(res, event, url.searchParams.get("attribution") || "");
     }
     if (pathname === "/member/activate") {
       const token = url.searchParams.get("token") || "";
@@ -3029,6 +2926,38 @@ async function router(req, res) {
     if (pathname === "/payment/result") {
       return send(res, 200, publicPaymentResultPage(url.searchParams.get("order") || ""), { "Cache-Control": "no-store" });
     }
+    const shareMatch = pathname.match(/^\/s\/([A-Za-z0-9_-]+)$/);
+    if (shareMatch) {
+      try {
+        const ipHash = crypto.createHash("sha256").update(`${SESSION_SECRET}:${clientIp(req)}`).digest("hex");
+        const link = sharingFoundation.recordShareClick(db, shareMatch[1], {
+          ipHash,
+          userAgent: req.headers["user-agent"] || ""
+        });
+        if (link.link_type === "member") {
+          return redirect(res, `/member/register?ref=${encodeURIComponent(link.sharer_code)}`);
+        }
+        if (link.link_type === "product") {
+          return redirect(res, `https://tally.so/r/1A5eO4?product=${encodeURIComponent(link.product_code)}&ref=${encodeURIComponent(link.sharer_code)}`);
+        }
+        return redirect(res, `/events/${link.event_id}/register?share=${encodeURIComponent(link.token)}`);
+      } catch {
+        return send(res, 404, page("分享連結無效", `<div class="empty">此分享連結不存在或已停用。</div>`));
+      }
+    }
+    const publicEventMatch = pathname.match(/^\/events\/(\d+)\/register$/);
+    if (publicEventMatch) {
+      const event = db.prepare("SELECT * FROM platform_events WHERE id = ? AND registration_open = 1").get(publicEventMatch[1]);
+      if (!event) return send(res, 404, page("找不到活動", `<div class="empty">活動不存在或報名已關閉。</div>`));
+      const shareToken = String(url.searchParams.get("share") || "");
+      if (shareToken) {
+        const link = sharingFoundation.shareLinkByToken(db, shareToken);
+        if (!link || link.link_type !== "event" || link.event_id !== event.id) {
+          return send(res, 404, page("分享連結無效", `<div class="empty">此活動分享連結不存在或已停用。</div>`));
+        }
+      }
+      return send(res, 200, eventRegistrationPage(event, shareToken), { "Cache-Control": "no-store" });
+    }
 
     if (pathname === "/account/password") {
       const user = requireUser(req, res, ["admin", "store", "member"]);
@@ -3037,10 +2966,11 @@ async function router(req, res) {
     }
 
     if (pathname === "/admin/dashboard") { const user = requireUser(req, res, ["admin"]); if (user) return adminDashboard(req, res, user); return; }
+    if (pathname === "/admin/sharing") { const user = requireUser(req, res, ["admin"]); if (user) return adminSharingPage(req, res, user); return; }
     if (pathname === "/admin/mall") { const user = requireUser(req, res, ["admin"]); if (user) return adminMallPage(req, res, user); return; }
     if (pathname === "/admin/orders") { const user = requireUser(req, res, ["admin"]); if (user) return adminOrdersPage(req, res, user); return; }
-    const adminOrderDetail = pathname.match(/^\/admin\/orders\/([^/]+)$/);
-    if (adminOrderDetail) { const user = requireUser(req, res, ["admin"]); if (user) return adminOrderDetailPage(req, res, user, adminOrderDetail[1]); return; }
+    const adminOrderDetail = pathname.match(/^\/admin\/orders\/([A-Za-z0-9_-]+)$/);
+    if (adminOrderDetail) { const user = requireUser(req, res, ["admin"]); if (user) return adminOrderDetailPage(res, user, adminOrderDetail[1]); return; }
     if (pathname === "/admin/media") { const user = requireUser(req, res, ["admin"]); if (user) return adminMediaPage(req, res, user); return; }
     if (pathname === "/admin/reports") { const user = requireUser(req, res, ["admin"]); if (user) return adminReports(req, res, user); return; }
     if (pathname === "/admin/manager-requests") { const user = requireUser(req, res, ["admin"]); if (user) return managerRequestsPage(res, user); return; }
@@ -3048,9 +2978,6 @@ async function router(req, res) {
     if (pathname === "/admin/stores") { const user = requireUser(req, res, ["admin"]); if (user) return adminStores(req, res, user); return; }
     if (pathname === "/admin/stores/new") { const user = requireUser(req, res, ["admin"]); if (user) return send(res, 200, page("新增分店", storeForm(), user)); return; }
     if (pathname === "/admin/members") { const user = requireUser(req, res, ["admin"]); if (user) return adminMembers(req, res, user); return; }
-    if (pathname === "/admin/events") { const user = requireUser(req, res, ["admin"]); if (user) return adminEventsPage(req, res, user); return; }
-    const adminMemberReferral = pathname.match(/^\/admin\/members\/(\d+)$/);
-    if (adminMemberReferral) { const user = requireUser(req, res, ["admin"]); if (user) return adminMemberReferralPage(req, res, user, adminMemberReferral[1]); return; }
     const adminStore = pathname.match(/^\/admin\/stores\/(\d+)$/);
     if (adminStore) { const user = requireUser(req, res, ["admin"]); if (user) return adminStoreDetail(req, res, user, adminStore[1]); return; }
     const adminView = pathname.match(/^\/admin\/stores\/(\d+)\/view$/);

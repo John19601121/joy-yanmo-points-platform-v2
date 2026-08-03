@@ -23,19 +23,19 @@ function database() {
   return { db, directory };
 }
 
-function addActiveMember(db, {
-  code = "LTTESTSHARER",
-  name = "分享會員",
-  phone = "0912345678",
-  email = "sharer@example.test"
-} = {}) {
+function addActiveMember(db, suffix = "SHARER") {
   const storeId = db.prepare("SELECT id FROM stores WHERE is_system_default = 1").get().id;
+  const digits = String(suffix).replace(/\D/g, "").padStart(2, "0").slice(-2);
+  const email = `${String(suffix).toLowerCase()}@example.test`;
+  const phone = `09123456${digits}`;
   const user = db.prepare(`INSERT INTO users (role, name, phone, email, password_hash, store_id)
-    VALUES ('member', ?, ?, ?, 'hash', ?) RETURNING id`).get(name, phone, email, storeId);
+    VALUES ('member', ?, ?, ?, 'hash', ?) RETURNING id`).get(`會員${suffix}`, phone, email, storeId);
   const member = db.prepare(`INSERT INTO members (store_id, user_id, member_code, name, phone, email)
-    VALUES (?, ?, ?, ?, ?, ?) RETURNING id, member_code`).get(storeId, user.id, code, name, phone, email);
-  db.prepare(`INSERT INTO member_profiles (member_id, activation_status)
-    VALUES (?, 'active')`).run(member.id);
+    VALUES (?, ?, ?, ?, ?, ?) RETURNING id, member_code`).get(
+      storeId, user.id, `LTTEST${suffix}`, `會員${suffix}`, phone, email
+    );
+  db.prepare(`INSERT INTO member_profiles (member_id, normalized_email, normalized_phone, activation_status)
+    VALUES (?, ?, ?, 'active')`).run(member.id, email, phone);
   return member;
 }
 
@@ -100,7 +100,7 @@ test("stage order snapshots price, distribution and optional sharer", () => {
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
-test("successful signed callback pays once and creates complete allocation snapshots", () => {
+test("successful signed callback pays once and creates five allocation snapshots", () => {
   const { db, directory } = database();
   const sharer = addActiveMember(db);
   const created = foundation.createStageTestOrder(db, { sharerCode: sharer.member_code });
@@ -113,88 +113,68 @@ test("successful signed callback pays once and creates complete allocation snaps
   assert.equal(db.prepare("SELECT payment_status FROM orders WHERE id = ?").get(created.order.id).payment_status, "paid");
   assert.equal(db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id = ? AND provider = 'ecpay'").get(created.order.id).count, 1);
   const allocations = db.prepare("SELECT role, rate, amount, beneficiary_member_id FROM order_allocations WHERE order_id = ? ORDER BY role").all(created.order.id);
-  assert.equal(allocations.length, 7);
+  assert.equal(allocations.length, 5);
   assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 600);
   assert.equal(allocations.find((allocation) => allocation.role === "sharer").beneficiary_member_id, sharer.id);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
-test("buyer referrer and product partner rewards come from the bonus pool without replacing the product sharer", () => {
+test("paid order snapshots independent 20%, 1% and 2% relationships from the bonus pool", () => {
   const { db, directory } = database();
-  const buyer = addActiveMember(db, {
-    code: "LTTESTBUYER", name: "購買會員", phone: "0912000001", email: "buyer@example.test"
-  });
-  const permanentReferrer = addActiveMember(db, {
-    code: "LTTESTPERMANENT", name: "永久推薦人", phone: "0912000002", email: "permanent@example.test"
-  });
-  const sharer = addActiveMember(db, {
-    code: "LTTESTLINK", name: "商品分享人", phone: "0912000003", email: "link@example.test"
-  });
-  const partner = addActiveMember(db, {
-    code: "LTTESTPARTNER", name: "合作引薦人", phone: "0912000004", email: "partner@example.test"
-  });
-  const memberFoundation = require("../lib/member-foundation");
-  const referralSharing = require("../lib/referral-sharing");
-  memberFoundation.setReferral(db, buyer.id, permanentReferrer.id, "test");
-  const product = db.prepare("SELECT id FROM products WHERE product_code = 'SOAP001'").get();
-  referralSharing.setProductPartnerReferral(db, {
-    productId: product.id,
-    referrerMemberId: partner.id,
-    source: "test"
-  });
+  const buyer = addActiveMember(db, "01");
+  const sharer = addActiveMember(db, "02");
+  const referrer = addActiveMember(db, "03");
+  const introducer = addActiveMember(db, "04");
+  const productId = db.prepare("SELECT id FROM products WHERE product_code = 'SOAP001'").get().id;
+  db.prepare(`INSERT INTO member_referrals (member_id, referrer_member_id, source)
+    VALUES (?, ?, 'test')`).run(buyer.id, referrer.id);
+  db.prepare(`INSERT INTO product_referrals (product_id, introducer_member_id)
+    VALUES (?, ?)`).run(productId, introducer.id);
 
   const created = foundation.createStageTestOrder(db, {
     buyerMemberCode: buyer.member_code,
-    sharerCode: sharer.member_code,
-    buyerName: "購買會員",
-    buyerEmail: "buyer@example.test",
-    buyerPhone: "0912000001"
+    sharerCode: sharer.member_code
   });
   assert.equal(created.order.sharer_member_id, sharer.id);
-  assert.equal(created.order.buyer_referrer_member_id, permanentReferrer.id);
-  assert.equal(created.item.partner_referrer_member_id, partner.id);
-  foundation.applyEcpayCallback(db, signedCallback(created.order).payload, signedCallback(created.order).config);
+  assert.equal(created.order.referrer_member_id_snapshot, referrer.id);
+  assert.equal(created.item.product_introducer_member_id_snapshot, introducer.id);
 
+  const callback = signedCallback(created.order);
+  foundation.applyEcpayCallback(db, callback.payload, callback.config);
   const allocations = db.prepare(`SELECT role, rate, amount, beneficiary_member_id
     FROM order_allocations WHERE order_id = ? ORDER BY role`).all(created.order.id);
-  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.rate, 0), 100);
+  assert.equal(allocations.length, 7);
   assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 600);
-  assert.deepEqual(
-    Object.fromEntries(allocations.map((row) => [row.role, {
-      rate: row.rate, amount: row.amount, beneficiary: row.beneficiary_member_id
-    }])),
-    {
-      bonus_pool: { rate: 7, amount: 42, beneficiary: null },
-      content: { rate: 20, amount: 120, beneficiary: null },
-      member_referrer: { rate: 1, amount: 6, beneficiary: permanentReferrer.id },
-      platform: { rate: 10, amount: 60, beneficiary: null },
-      product_partner_referrer: { rate: 2, amount: 12, beneficiary: partner.id },
-      sharer: { rate: 20, amount: 120, beneficiary: sharer.id },
-      supplier: { rate: 40, amount: 240, beneficiary: null }
-    }
-  );
+  assert.deepEqual(Object.fromEntries(allocations.map((row) => [row.role, row.rate])), {
+    bonus_pool: 7,
+    content: 20,
+    member_referral: 1,
+    platform: 10,
+    product_introducer: 2,
+    sharer: 20,
+    supplier: 40
+  });
+  assert.equal(allocations.find((row) => row.role === "sharer").beneficiary_member_id, sharer.id);
+  assert.equal(allocations.find((row) => row.role === "member_referral").beneficiary_member_id, referrer.id);
+  assert.equal(allocations.find((row) => row.role === "product_introducer").beneficiary_member_id, introducer.id);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
-test("order snapshots keep the original referral even after an administrator changes the member relationship", () => {
+test("later administrator relationship changes never rewrite an existing order snapshot", () => {
   const { db, directory } = database();
-  const buyer = addActiveMember(db, {
-    code: "LTBUYERSNAPSHOT", name: "快照購買人", phone: "0912000011", email: "snapshot-buyer@example.test"
-  });
-  const first = addActiveMember(db, {
-    code: "LTFIRSTREF", name: "原推薦人", phone: "0912000012", email: "first-ref@example.test"
-  });
-  const second = addActiveMember(db, {
-    code: "LTSECONDREF", name: "新推薦人", phone: "0912000013", email: "second-ref@example.test"
-  });
-  const memberFoundation = require("../lib/member-foundation");
-  memberFoundation.setReferral(db, buyer.id, first.id, "test");
-  const before = foundation.createStageTestOrder(db, { buyerMemberCode: buyer.member_code });
-  memberFoundation.setReferral(db, buyer.id, second.id, "admin", null, "資料更正");
-  const after = foundation.createStageTestOrder(db, { buyerMemberCode: buyer.member_code });
-  assert.equal(before.order.buyer_referrer_member_id, first.id);
-  assert.equal(after.order.buyer_referrer_member_id, second.id);
-  assert.equal(db.prepare("SELECT buyer_referrer_member_id FROM orders WHERE id = ?").get(before.order.id).buyer_referrer_member_id, first.id);
+  const buyer = addActiveMember(db, "05");
+  const original = addActiveMember(db, "06");
+  const replacement = addActiveMember(db, "07");
+  db.prepare(`INSERT INTO member_referrals (member_id, referrer_member_id, source)
+    VALUES (?, ?, 'test')`).run(buyer.id, original.id);
+  const created = foundation.createStageTestOrder(db, { buyerMemberCode: buyer.member_code });
+  db.prepare("UPDATE member_referrals SET status = 'replaced', ended_at = CURRENT_TIMESTAMP WHERE member_id = ?").run(buyer.id);
+  db.prepare(`INSERT INTO member_referrals (member_id, referrer_member_id, source)
+    VALUES (?, ?, 'admin')`).run(buyer.id, replacement.id);
+  foundation.applyEcpayCallback(db, signedCallback(created.order).payload, signedCallback(created.order).config);
+  const referralAllocation = db.prepare(`SELECT beneficiary_member_id
+    FROM order_allocations WHERE order_id = ? AND role = 'member_referral'`).get(created.order.id);
+  assert.equal(referralAllocation.beneficiary_member_id, original.id);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
@@ -260,6 +240,39 @@ test("production trial offer snapshots NT$200 merchandise plus NT$65 shipping wi
   const allocations = db.prepare("SELECT role, amount FROM order_allocations WHERE order_id = ?").all(created.order.id);
   assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 200);
   assert.equal(db.prepare("SELECT payment_status FROM orders WHERE id = ?").get(created.order.id).payment_status, "paid");
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("production checkout keeps PR #7 referral and product-introducer snapshots", () => {
+  const { db, directory } = database();
+  const buyer = addActiveMember(db, "11");
+  const sharer = addActiveMember(db, "12");
+  const referrer = addActiveMember(db, "13");
+  const introducer = addActiveMember(db, "14");
+  const productId = db.prepare("SELECT id FROM products WHERE product_code = 'SOAP001'").get().id;
+  db.prepare(`INSERT INTO member_referrals (member_id, referrer_member_id, source)
+    VALUES (?, ?, 'test')`).run(buyer.id, referrer.id);
+  db.prepare(`INSERT INTO product_referrals (product_id, introducer_member_id)
+    VALUES (?, ?)`).run(productId, introducer.id);
+
+  const created = foundation.createProductionOrder(db, {
+    buyerMemberCode: buyer.member_code,
+    buyerName: "正式會員買家",
+    buyerEmail: "buyer11@example.test",
+    buyerPhone: "0911000011",
+    receiverName: "正式會員買家",
+    receiverPhone: "0911000011",
+    shippingAddress: "台北市中山區測試路11號",
+    sharerCode: sharer.member_code,
+    checkoutToken: "production-checkout-token-00000011"
+  });
+  assert.equal(created.order.referrer_member_id_snapshot, referrer.id);
+  assert.equal(created.item.product_introducer_member_id_snapshot, introducer.id);
+  foundation.applyEcpayCallback(db, signedProductionCallback(created.order).payload, signedProductionCallback(created.order).config);
+  const allocations = db.prepare("SELECT role, amount, beneficiary_member_id FROM order_allocations WHERE order_id = ?").all(created.order.id);
+  assert.equal(allocations.reduce((sum, row) => sum + row.amount, 0), 200);
+  assert.equal(allocations.find((row) => row.role === "member_referral").beneficiary_member_id, referrer.id);
+  assert.equal(allocations.find((row) => row.role === "product_introducer").beneficiary_member_id, introducer.id);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
