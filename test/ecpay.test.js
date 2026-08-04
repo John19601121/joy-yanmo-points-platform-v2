@@ -56,6 +56,40 @@ test("stage checkout remains locked unless every safety switch is present", () =
   assert.throws(() => ecpay.assertStageCheckoutAllowed(production), /Production.*not enabled/);
 });
 
+test("Stage admin checkout readiness follows the displayed Stage checks", () => {
+  const stageEnvironment = {
+    ECPAY_MODE: "stage",
+    ECPAY_STAGE_ENABLED: "true",
+    ECPAY_MERCHANT_ID: "test-merchant",
+    ECPAY_HASH_KEY: "test-key",
+    ECPAY_HASH_IV: "test-iv",
+    APP_BASE_URL: "https://example.test",
+    ECPAY_CREDIT_ENABLED: "true",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "false"
+  };
+
+  assert.deepEqual(ecpay.stageCheckoutReadiness(stageEnvironment), {
+    modeSelected: true,
+    stageEnabled: true,
+    credentialsReady: true,
+    creditEnabled: true,
+    checkoutEnabled: true
+  });
+
+  assert.equal(ecpay.stageCheckoutReadiness({
+    ...stageEnvironment,
+    ECPAY_CREDIT_ENABLED: "false"
+  }).checkoutEnabled, false);
+
+  const productionSelected = ecpay.stageCheckoutReadiness({
+    ...stageEnvironment,
+    ECPAY_MODE: "production"
+  });
+  assert.equal(productionSelected.stageEnabled, true);
+  assert.equal(productionSelected.checkoutEnabled, false);
+});
+
 test("checkout parameters keep server notification and browser result URLs separate", () => {
   const config = ecpay.paymentConfig({
     ECPAY_MODE: "stage",

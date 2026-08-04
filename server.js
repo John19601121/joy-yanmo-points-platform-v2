@@ -1612,7 +1612,7 @@ function productionCheckoutPage(req, res, productCode, {
 
 function adminOrdersPage(req, res, user, message = "") {
   const config = ecpay.paymentConfig();
-  const stageConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "stage" });
+  const stageStatus = ecpay.stageCheckoutReadiness();
   const productionConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "production" });
   const testProduct = db.prepare(`SELECT p.product_code, p.name, config.stage_price, config.checkout_mode,
       config.distribution_json
@@ -1628,10 +1628,10 @@ function adminOrdersPage(req, res, user, message = "") {
     LIMIT 100`).all();
   const distribution = testProduct ? orderFoundation.parseDistribution(testProduct.distribution_json) : null;
   const stageReadiness = [
-    ["目前模式選擇 Stage", config.mode === "stage"],
-    ["Stage 總開關", stageConfig.stageEnabled],
-    ["Stage MerchantID／HashKey／HashIV", stageConfig.credentialsReady],
-    ["Stage 信用卡測試", stageConfig.creditEnabled]
+    ["目前模式選擇 Stage", stageStatus.modeSelected],
+    ["Stage 總開關", stageStatus.stageEnabled],
+    ["Stage MerchantID／HashKey／HashIV", stageStatus.credentialsReady],
+    ["Stage 信用卡測試", stageStatus.creditEnabled]
   ];
   const productionReadiness = [
     ["目前模式選擇 Production", config.mode === "production"],
@@ -1668,7 +1668,7 @@ function adminOrdersPage(req, res, user, message = "") {
           <form class="stack" method="post" action="/admin/orders/test" style="margin-top:16px">
             <div class="field"><label>測試購買會員編號（可留空）</label><input name="buyer_member_code" placeholder="用於驗證永久推薦1%"></div>
             <div class="field"><label>測試分享者會員編號（可留空）</label><input name="sharer_code" placeholder="LT20260700001"></div>
-            <button class="button" ${config.stageEnabled && config.creditEnabled ? "" : "disabled"}>建立測試訂單並前往綠界</button>
+            <button class="button" type="submit" ${stageStatus.checkoutEnabled ? "" : "disabled"}>建立測試訂單並前往綠界</button>
           </form>` : `<div class="empty">尚未建立測試商品設定。</div>`}
       </section>
     </div>
