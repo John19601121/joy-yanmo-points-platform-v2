@@ -1744,11 +1744,19 @@ function publicPaymentResultPage(orderNo, message = "") {
 }
 
 async function handleEcpayReturn(req, res) {
+  let payload = {};
+  let config = null;
   try {
-    const payload = await readBody(req);
-    const config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
+    payload = await readBody(req);
+    config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
+    console.info("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("return", payload, config)));
     if (!config) throw new Error("ECPay callback MerchantID is not active.");
     const result = orderFoundation.applyEcpayCallback(db, payload, config);
+    console.info("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("return", payload, config, {
+      outcome: "accepted",
+      paid: result.paid,
+      duplicate: result.duplicate
+    })));
     sendText(res, 200, "1|OK", { "Cache-Control": "no-store" });
     if (result.paid && !result.duplicate) {
       setImmediate(() => notificationCenter.sendPaymentNotification({ order: result.order }).catch((error) => {
@@ -1756,23 +1764,41 @@ async function handleEcpayReturn(req, res) {
       }));
     }
   } catch (error) {
-    console.warn("ECPay ReturnURL rejected:", error.message);
+    console.warn("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("return", payload, config, {
+      outcome: "rejected",
+      reason: ecpay.callbackFailureCode(error)
+    })));
     sendText(res, 400, "0|Error", { "Cache-Control": "no-store" });
   }
 }
 
 async function handleEcpayOrderResult(req, res) {
-  const payload = await readBody(req);
-  const config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
-  const valid = Boolean(config)
-    && config.callbackEnabled
-    && String(payload.MerchantID || "") === config.merchantId
-    && ecpay.verifyCheckMacValue(payload, config);
-  const orderNo = valid ? String(payload.MerchantTradeNo || "") : "";
-  const body = valid
-    ? publicPaymentResultPage(orderNo, "已返回平台；付款入帳仍以伺服器通知為準。")
-    : page("付款結果", `<div class="empty">付款結果驗證失敗，平台不會因此建立付款成功紀錄。</div>`);
-  send(res, valid ? 200 : 400, body, { "Cache-Control": "no-store" });
+  let payload = {};
+  let config = null;
+  try {
+    payload = await readBody(req);
+    config = ecpay.paymentConfigForMerchantId(payload.MerchantID);
+    console.info("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("order-result", payload, config)));
+    if (!config) throw new Error("ECPay callback MerchantID is not active.");
+    if (!config.callbackEnabled) throw new Error("ECPay callback credentials are not configured or approved.");
+    if (String(payload.MerchantID || "") !== config.merchantId) throw new Error("ECPay MerchantID does not match.");
+    if (!ecpay.verifyCheckMacValue(payload, config)) throw new Error("ECPay CheckMacValue is invalid.");
+    console.info("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("order-result", payload, config, {
+      outcome: "accepted"
+    })));
+    send(res, 200, publicPaymentResultPage(
+      String(payload.MerchantTradeNo || ""),
+      "已返回平台；付款入帳仍以伺服器通知為準。"
+    ), { "Cache-Control": "no-store" });
+  } catch (error) {
+    console.warn("ECPay callback:", JSON.stringify(ecpay.callbackDiagnostic("order-result", payload, config, {
+      outcome: "rejected",
+      reason: ecpay.callbackFailureCode(error)
+    })));
+    send(res, 400, page("付款結果", `<div class="empty">付款結果驗證失敗，平台不會因此建立付款成功紀錄。</div>`), {
+      "Cache-Control": "no-store"
+    });
+  }
 }
 
 function mediaCardHtml(asset, { selectable = false } = {}) {

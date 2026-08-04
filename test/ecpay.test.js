@@ -90,7 +90,7 @@ test("Stage admin checkout readiness follows the displayed Stage checks", () => 
   assert.equal(productionSelected.checkoutEnabled, false);
 });
 
-test("checkout parameters keep server notification and browser result URLs separate", () => {
+test("Stage checkout keeps ReturnURL but temporarily omits OrderResultURL for callback diagnosis", () => {
   const config = ecpay.paymentConfig({
     ECPAY_MODE: "stage",
     ECPAY_STAGE_ENABLED: "true",
@@ -104,11 +104,54 @@ test("checkout parameters keep server notification and browser result URLs separ
   const item = { product_name: "菱烏金炭皂", quantity: 1 };
   const parameters = ecpay.buildCheckoutParameters(order, item, config, new Date("2026-07-26T12:00:00Z"));
   assert.equal(parameters.ReturnURL, "https://example.test/payments/ecpay/return");
-  assert.equal(parameters.OrderResultURL, "https://example.test/payments/ecpay/order-result");
-  assert.notEqual(parameters.ReturnURL, parameters.OrderResultURL);
+  assert.equal(parameters.OrderResultURL, undefined);
+  assert.equal(parameters.ClientBackURL, "https://example.test/payment/result?order=LT2607261200000001");
   assert.equal(parameters.ChoosePayment, "Credit");
   assert.equal(parameters.TotalAmount, "600");
   assert.equal(ecpay.verifyCheckMacValue(parameters, config), true);
+});
+
+test("callback diagnostics are useful without logging identifiers, secrets, or personal data", () => {
+  const payload = {
+    MerchantID: "3002607",
+    MerchantTradeNo: "LT2608041525162935",
+    CheckMacValue: "A".repeat(64),
+    RtnCode: "1",
+    SimulatePaid: "1",
+    Card4No: "2222",
+    email: "person@example.test"
+  };
+  const entry = ecpay.callbackDiagnostic("return", payload, {
+    mode: "stage",
+    merchantId: "3002607"
+  }, { outcome: "accepted", paid: true, duplicate: false });
+  const serialized = JSON.stringify(entry);
+
+  assert.deepEqual(Object.keys(entry), [
+    "event", "route", "environment", "outcome", "order_ref", "merchant_matched",
+    "checkmac_present", "result_code", "simulated", "paid", "duplicate"
+  ]);
+  assert.equal(entry.environment, "stage");
+  assert.equal(entry.merchant_matched, true);
+  assert.equal(entry.checkmac_present, true);
+  assert.equal(entry.result_code, "1");
+  assert.equal(entry.simulated, true);
+  assert.equal(entry.order_ref.length, 12);
+  assert.equal(serialized.includes(payload.MerchantID), false);
+  assert.equal(serialized.includes(payload.MerchantTradeNo), false);
+  assert.equal(serialized.includes(payload.CheckMacValue), false);
+  assert.equal(serialized.includes(payload.Card4No), false);
+  assert.equal(serialized.includes(payload.email), false);
+});
+
+test("callback failures are reduced to a safe fixed reason code", () => {
+  assert.equal(ecpay.callbackFailureCode(new Error("ECPay CheckMacValue is invalid.")), "checkmac_rejected");
+  assert.equal(ecpay.callbackFailureCode(new Error("secret value accidentally appeared")), "request_rejected");
+  const entry = ecpay.callbackDiagnostic("return", {}, null, {
+    outcome: "rejected",
+    reason: "secret value accidentally appeared"
+  });
+  assert.equal(entry.reason, "request_rejected");
 });
 
 test("production credentials stay isolated and require every live-collection lock", () => {
@@ -201,6 +244,7 @@ test("production checkout parameters are signed only with production configurati
   assert.equal(parameters.MerchantID, "3222651");
   assert.equal(parameters.TotalAmount, "265");
   assert.equal(parameters.CustomField2, "LT_PRODUCTION");
+  assert.equal(parameters.OrderResultURL, "https://example.test/payments/ecpay/order-result");
   assert.equal(ecpay.checkoutGatewayUrl(config.mode), ecpay.PRODUCTION_GATEWAY_URL);
   assert.equal(ecpay.verifyCheckMacValue(parameters, config), true);
   assert.equal(ecpay.verifyCheckMacValue(parameters, { hashKey: "stage-key", hashIv: "stage-iv" }), false);
