@@ -9,6 +9,7 @@ const memberFoundation = require("./lib/member-foundation");
 const activationEmail = require("./lib/activation-email");
 const ecpay = require("./lib/ecpay");
 const orderFoundation = require("./lib/order-foundation");
+const productSettings = require("./lib/product-settings");
 const notificationCenter = require("./lib/notification-center");
 const sharingFoundation = require("./lib/sharing-foundation");
 
@@ -1236,9 +1237,6 @@ function adminSharingPage(req, res, user, message = "") {
   const memberOptions = members.map((member) =>
     `<option value="${member.id}">${escapeHtml(member.member_code)}｜${escapeHtml(member.name)}</option>`
   ).join("");
-  const productOptions = products.map((product) =>
-    `<option value="${product.id}">${escapeHtml(product.product_code)}｜${escapeHtml(product.name)}</option>`
-  ).join("");
   send(res, 200, page("分享與分潤", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
     <div class="grid split">
       <section class="panel">
@@ -1263,14 +1261,9 @@ function adminSharingPage(req, res, user, message = "") {
     </div>
     <section class="panel" style="margin-top:16px">
       <h2>商品／合作引薦人（每筆2%）</h2>
-      <form class="stack" method="post" action="/admin/sharing/product-introducers">
-        <div class="field"><label>商品</label><select name="product_id" required>${productOptions}</select></div>
-        <div class="field"><label>引薦會員編號</label><input name="introducer_code" required></div>
-        <div class="field"><label>設定原因</label><input name="reason" required></div>
-        <button class="button">設定商品引薦人</button>
-      </form>
+      <p class="muted">商品引薦人已與價格、運費及七項分潤整合到各商品後台設定；此頁只顯示關係摘要。</p>
       <table class="table" style="margin-top:16px"><thead><tr><th>商品</th><th>目前引薦人</th></tr></thead><tbody>${products.map((product) =>
-        `<tr><td>${escapeHtml(product.product_code)}｜${escapeHtml(product.name)}</td><td>${escapeHtml(product.introducer_code || "未設定")}${product.introducer_name ? `｜${escapeHtml(product.introducer_name)}` : ""}</td></tr>`
+        `<tr><td><a href="/admin/mall?edit=${encodeURIComponent(product.product_code)}">${escapeHtml(product.product_code)}｜${escapeHtml(product.name)}</a></td><td>${escapeHtml(product.introducer_code || "未設定")}${product.introducer_name ? `｜${escapeHtml(product.introducer_name)}` : ""}</td></tr>`
       ).join("")}</tbody></table>
     </section>
     <section class="panel" style="margin-top:16px">
@@ -1614,13 +1607,17 @@ function adminOrdersPage(req, res, user, message = "") {
   const config = ecpay.paymentConfig();
   const stageStatus = ecpay.stageCheckoutReadiness();
   const productionConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "production" });
-  const testProduct = db.prepare(`SELECT p.product_code, p.name, config.stage_price, config.checkout_mode,
-      config.distribution_json
+  const testProducts = db.prepare(`SELECT p.product_code, p.name, config.checkout_mode,
+      offers.offer_code, offers.display_name, offers.merchandise_amount, offers.shipping_amount,
+      offers.distribution_json
     FROM product_checkout_configs config
     JOIN products p ON p.id = config.product_id
-    WHERE config.environment = 'stage'
-    ORDER BY config.id
-    LIMIT 1`).get();
+    JOIN product_checkout_offers offers
+      ON offers.product_id = p.id AND offers.offer_code = config.stage_offer_code
+    WHERE config.environment = 'stage' AND config.checkout_mode = 'stage_test'
+      AND p.is_active = 1 AND offers.is_active = 1
+    ORDER BY config.id`).all();
+  const testProduct = testProducts[0] || null;
   const orders = db.prepare(`SELECT orders.*, members.member_code AS sharer_code
     FROM orders
     LEFT JOIN members ON members.id = orders.sharer_member_id
@@ -1660,12 +1657,14 @@ function adminOrdersPage(req, res, user, message = "") {
         <table class="table"><tbody>${productionReadiness.map(([label, ready]) => `<tr><th>${escapeHtml(label)}</th><td><span class="badge">${ready ? "已就緒" : "未啟用"}</span></td></tr>`).join("")}</tbody></table>
       </section>
       <section class="panel">
-        <h2>第一項測試商品</h2>
+        <h2>後台商品方案 Stage 驗收</h2>
         ${testProduct ? `<p><b>${escapeHtml(testProduct.name)}</b>（${escapeHtml(testProduct.product_code)}）</p>
-          <p>內部測試基準：<b>NT$ ${money(testProduct.stage_price)}</b></p>
-          <p class="muted">此金額不會覆寫商城售價，也不代表供應商正式核准。</p>
-          <div class="actions">${Object.entries(distribution).map(([role, rate]) => `<span class="badge">${escapeHtml({ supplier: "供應商", content: "內容製作", sharer: "推薦分享", platform: "平台", bonus_pool: "獎勵池" }[role])} ${rate}%</span>`).join("")}</div>
+          <p>Stage 使用方案：<b>${escapeHtml(testProduct.display_name)}</b></p>
+          <p>商品 NT$ ${money(testProduct.merchandise_amount)}＋運費 NT$ ${money(testProduct.shipping_amount)}＝<b>付款總額 NT$ ${money(testProduct.merchandise_amount + testProduct.shipping_amount)}</b></p>
+          <p class="muted">Stage 與正式結帳讀取同一份商品方案；運費不參與分潤。</p>
+          <div class="actions">${Object.entries(distribution).map(([role, rate]) => `<span class="badge">${escapeHtml({ supplier: "供應商", content: "內容製作", sharer: "成交分享", platform: "平台", member_referral: "永久推薦", product_introducer: "商品引薦", bonus_pool: "剩餘獎勵池" }[role])} ${rate}%</span>`).join("")}</div>
           <form class="stack" method="post" action="/admin/orders/test" style="margin-top:16px">
+            <div class="field"><label>Stage 測試商品</label><select name="product_code" required>${testProducts.map((product) => `<option value="${escapeHtml(product.product_code)}">${escapeHtml(product.name)}｜${escapeHtml(product.display_name)}｜總額 NT$ ${money(product.merchandise_amount + product.shipping_amount)}</option>`).join("")}</select></div>
             <div class="field"><label>測試購買會員編號（可留空）</label><input name="buyer_member_code" placeholder="用於驗證永久推薦1%"></div>
             <div class="field"><label>測試分享者會員編號（可留空）</label><input name="sharer_code" placeholder="LT20260700001"></div>
             <button class="button" type="submit" ${stageStatus.checkoutEnabled ? "" : "disabled"}>建立測試訂單並前往綠界</button>
@@ -1695,10 +1694,10 @@ function adminOrderDetailPage(res, user, orderNo) {
     LEFT JOIN members ON members.id = allocations.beneficiary_member_id
     WHERE allocations.order_id = ? ORDER BY allocations.id`).all(details.order.id);
   send(res, 200, page(`訂單 ${details.order.order_no}`, `<section class="panel">
-    <p>金額：<b>NT$ ${money(details.order.total_amount)}</b>｜付款：${escapeHtml(paymentStatusLabel(details.order.payment_status))}</p>
+    <p>商品金額：NT$ ${money(details.order.subtotal_amount || details.items.reduce((sum, item) => sum + item.line_total, 0))}｜運費：NT$ ${money(details.order.shipping_amount)}｜付款總額：<b>NT$ ${money(details.order.total_amount)}</b>｜付款：${escapeHtml(paymentStatusLabel(details.order.payment_status))}</p>
     <p class="muted">關係在訂單建立時快照；管理員之後更換推薦人或商品引薦人，不會改變本訂單。</p>
     ${allocations.length ? `<table class="table"><thead><tr><th>分配角色</th><th>比例</th><th>金額</th><th>歸屬會員</th><th>狀態</th></tr></thead><tbody>${allocations.map((allocation) =>
-      `<tr><td>${escapeHtml(roleLabels[allocation.role] || allocation.role)}</td><td>${allocation.rate}%</td><td>NT$ ${money(allocation.amount)}</td><td>${escapeHtml(allocation.member_code || (allocation.role === "sharer" ? "待歸屬" : "平台內部"))}${allocation.name ? `｜${escapeHtml(allocation.name)}` : ""}</td><td>${escapeHtml(allocation.status)}</td></tr>`
+      `<tr><td>${escapeHtml(roleLabels[allocation.role] || allocation.role)}</td><td>${allocation.rate}%</td><td>NT$ ${money(allocation.amount)}</td><td>${escapeHtml(allocation.member_code || (allocation.status === "unassigned" ? "待歸屬" : "平台內部"))}${allocation.name ? `｜${escapeHtml(allocation.name)}` : ""}</td><td>${escapeHtml(allocation.status)}</td></tr>`
     ).join("")}</tbody></table>` : `<div class="empty">付款完成後才建立分配快照。</div>`}
     <p><a class="button secondary" href="/admin/orders">返回訂單中心</a></p>
   </section>`, user), { "Cache-Control": "no-store" });
@@ -1992,9 +1991,108 @@ function productDirectUploadHtml(editProduct, selectedMediaId = "") {
   </section>`;
 }
 
+function productCommerceSettingsHtml(product, selectedOfferCode = "") {
+  if (!product) return `<div class="notice">先新增並儲存商品，再設定成交方案、運費、分潤、人員與 Stage 測試方案。</div>`;
+  const offers = db.prepare(`SELECT * FROM product_checkout_offers
+    WHERE product_id = ? ORDER BY sort_order, id`).all(product.id);
+  const selectedOffer = offers.find((offer) => offer.offer_code === selectedOfferCode)
+    || offers[0]
+    || null;
+  const config = db.prepare("SELECT * FROM product_checkout_configs WHERE product_id = ?").get(product.id) || null;
+  const beneficiaryRows = db.prepare(`SELECT beneficiaries.role, members.member_code, members.name
+    FROM product_revenue_beneficiaries beneficiaries
+    JOIN members ON members.id = beneficiaries.beneficiary_member_id
+    WHERE beneficiaries.product_id = ?`).all(product.id);
+  const beneficiaries = Object.fromEntries(beneficiaryRows.map((row) => [row.role, row]));
+  const introducer = db.prepare(`SELECT members.member_code, members.name
+    FROM product_referrals referrals
+    JOIN members ON members.id = referrals.introducer_member_id
+    WHERE referrals.product_id = ? AND referrals.status = 'active' LIMIT 1`).get(product.id) || null;
+  let distribution = {
+    supplier: 40,
+    content: 20,
+    sharer: 20,
+    platform: 10,
+    member_referral: 1,
+    product_introducer: 2,
+    bonus_pool: 7
+  };
+  if (selectedOffer) {
+    const parsed = orderFoundation.parseDistribution(selectedOffer.distribution_json);
+    distribution = Object.hasOwn(parsed, "member_referral") ? parsed : {
+      ...parsed,
+      member_referral: 1,
+      product_introducer: 2,
+      bonus_pool: parsed.bonus_pool - 3
+    };
+  }
+  const roleLabels = {
+    supplier: "供應商",
+    content: "內容製作／品牌包裝",
+    sharer: "商品成交分享者",
+    platform: "平台營運",
+    member_referral: "永久推薦人",
+    product_introducer: "商品／合作引薦人",
+    bonus_pool: "剩餘獎勵池"
+  };
+  const offerRows = offers.length ? `<table class="table"><thead><tr><th>方案</th><th>商品／運費／總額</th><th>Stage</th><th>狀態</th></tr></thead><tbody>${offers.map((offer) =>
+    `<tr><td><a href="/admin/mall?edit=${encodeURIComponent(product.product_code)}&offer=${encodeURIComponent(offer.offer_code)}"><b>${escapeHtml(offer.display_name)}</b></a><br><span class="muted">${escapeHtml(offer.offer_code)}</span></td><td>NT$ ${money(offer.merchandise_amount)}＋NT$ ${money(offer.shipping_amount)}＝<b>NT$ ${money(offer.merchandise_amount + offer.shipping_amount)}</b></td><td>${config?.stage_offer_code === offer.offer_code && config.checkout_mode === "stage_test" ? "使用中" : "—"}</td><td>${offer.is_active ? "啟用" : "停用"}</td></tr>`
+  ).join("")}</tbody></table>` : `<div class="empty">尚無成交方案。</div>`;
+  const stageOptions = offers.filter((offer) => offer.is_active).map((offer) =>
+    `<option value="${escapeHtml(offer.offer_code)}" ${config?.stage_offer_code === offer.offer_code ? "selected" : ""}>${escapeHtml(offer.display_name)}｜商品 NT$ ${money(offer.merchandise_amount)}＋運費 NT$ ${money(offer.shipping_amount)}</option>`
+  ).join("");
+  return `<section class="panel" style="margin-top:16px">
+    <h2>成交方案、運費與分潤</h2>
+    <p class="muted">商品成交價是分潤基礎；運費只加入消費者付款總額，不參與分潤。Stage 與 Production 讀取同一方案。</p>
+    ${offerRows}
+    <form class="stack" method="post" action="/admin/mall/offers" style="margin-top:16px">
+      <input type="hidden" name="product_id" value="${product.id}">
+      <div class="field"><label>方案編號</label><input name="offer_code" value="${escapeHtml(selectedOffer?.offer_code || "trial_1")}" pattern="[a-z0-9_-]{2,40}" required></div>
+      <div class="field"><label>方案名稱</label><input name="display_name" value="${escapeHtml(selectedOffer?.display_name || "體驗組｜1個")}" required></div>
+      <div class="grid split">
+        <div class="field"><label>付費數量</label><input name="paid_quantity" type="number" min="1" value="${selectedOffer?.paid_quantity ?? 1}" required></div>
+        <div class="field"><label>贈送數量</label><input name="bonus_quantity" type="number" min="0" value="${selectedOffer?.bonus_quantity ?? 0}" required></div>
+        <div class="field"><label>商品成交價（分潤基礎）</label><input name="merchandise_amount" type="number" min="1" value="${selectedOffer?.merchandise_amount ?? ""}" required></div>
+        <div class="field"><label>運費（不參與分潤）</label><input name="shipping_amount" type="number" min="0" value="${selectedOffer?.shipping_amount ?? 0}" required></div>
+      </div>
+      <h3>分潤比例（合計 100%）</h3>
+      <div class="grid split">${orderFoundation.DISTRIBUTION_ROLES.map((role) =>
+        `<div class="field"><label>${escapeHtml(roleLabels[role])}</label><input name="rate_${role}" type="number" min="0" max="100" value="${distribution[role]}" required></div>`
+      ).join("")}</div>
+      <label class="actions" style="align-items:center"><input name="is_active" type="checkbox" value="1" ${selectedOffer?.is_active !== 0 ? "checked" : ""}> 啟用此成交方案</label>
+      <button class="button">儲存成交方案</button>
+    </form>
+  </section>
+  <div class="grid split" style="margin-top:16px">
+    <section class="panel">
+      <h2>分潤相關人員</h2>
+      <p class="muted">填會員編號；留空會顯示「待歸屬」。商品成交分享者與永久推薦人依每筆訂單自動帶入。</p>
+      <form class="stack" method="post" action="/admin/mall/beneficiaries">
+        <input type="hidden" name="product_id" value="${product.id}">
+        <div class="field"><label>供應商會員編號</label><input name="supplier_code" value="${escapeHtml(beneficiaries.supplier?.member_code || "")}" placeholder="LT..."></div>
+        <div class="field"><label>內容製作／品牌包裝會員編號</label><input name="content_code" value="${escapeHtml(beneficiaries.content?.member_code || "")}" placeholder="LT..."></div>
+        <div class="field"><label>平台營運會員編號（可留空為平台內部）</label><input name="platform_code" value="${escapeHtml(beneficiaries.platform?.member_code || "")}" placeholder="LT..."></div>
+        <div class="field"><label>商品／合作引薦人會員編號</label><input name="product_introducer_code" value="${escapeHtml(introducer?.member_code || "")}" placeholder="LT..."></div>
+        <button class="button">儲存相關人員</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Stage 測試設定</h2>
+      <p class="muted">不設定測試價格，只選擇上方已啟用的真實成交方案。</p>
+      ${stageOptions ? `<form class="stack" method="post" action="/admin/mall/stage-settings">
+        <input type="hidden" name="product_id" value="${product.id}">
+        <div class="field"><label>Stage 使用方案</label><select name="offer_code" required>${stageOptions}</select></div>
+        <label class="actions" style="align-items:center"><input name="stage_enabled" type="checkbox" value="1" ${config?.checkout_mode === "stage_test" ? "checked" : ""}> 允許此商品建立 Stage 測試訂單</label>
+        <button class="button">儲存 Stage 設定</button>
+      </form>` : `<div class="empty">請先建立並啟用至少一個成交方案。</div>`}
+    </section>
+  </div>`;
+}
+
 function adminMallPage(req, res, user, error = "", values = {}) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const editCode = String(url.searchParams.get("edit") || "").trim().toUpperCase();
+  const selectedOfferCode = String(url.searchParams.get("offer") || "").trim().toLowerCase();
   const editProduct = editCode ? db.prepare("SELECT * FROM products WHERE product_code = ?").get(editCode) : null;
   const selectedMedia = mediaAssetById(url.searchParams.get("media"));
   const productValues = { ...(editProduct || {}), ...(selectedMedia ? { media_asset_id: selectedMedia.id, image_url: selectedMedia.secure_url } : {}), ...values };
@@ -2040,12 +2138,13 @@ function adminMallPage(req, res, user, error = "", values = {}) {
         <div class="field"><label>商品圖片網址</label><input name="image_url" value="${escapeHtml(productValues.image_url || "")}" placeholder="https://"><span class="muted">請填入可直接顯示的 JPG、PNG 或 WebP 圖片網址，不可填入一般網頁或 Canva 頁面網址。</span></div>
         ${productMediaPickerHtml(productValues)}
         <div class="field"><label>商品介紹網址</label><input name="product_page_url" value="${escapeHtml(productValues.product_page_url || "")}" placeholder="https://" required></div>
-        <div class="field"><label>價格</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"></div>
+        <div class="field"><label>建議售價（展示用）</label><input name="price" type="number" min="0" step="1" value="${productValues.price ?? ""}" placeholder="留空顯示價格洽詢"><span class="muted">真正結帳金額請在下方「成交方案」設定。</span></div>
         <div class="field"><label>顯示順序</label><input name="sort_order" type="number" value="${productValues.sort_order ?? 0}"></div>
         <label class="actions" style="align-items:center"><input name="is_active" type="checkbox" value="1" ${String(productValues.is_active ?? 1) === "1" ? "checked" : ""}> 是否上架</label>
         <button class="button">${editProduct ? "儲存商品" : "新增商品"}</button>
       </form>
     </div>
+    ${productCommerceSettingsHtml(editProduct, selectedOfferCode)}
     ${productDirectUploadHtml(editProduct, productValues.media_asset_id)}
     <div style="margin-top:16px">${mallCatalogHtml(user, { admin: true })}</div>`, user));
 }
@@ -2305,7 +2404,7 @@ async function handlePost(req, res, pathname) {
       const config = ecpay.paymentConfig();
       ecpay.assertStageCheckoutAllowed(config);
       const result = orderFoundation.createStageTestOrder(db, {
-        productCode: "SOAP001",
+        productCode: String(body.product_code || "").trim().toUpperCase(),
         buyerMemberCode: String(body.buyer_member_code || "").trim(),
         sharerCode: String(body.sharer_code || "").trim(),
         actorUserId: user.id
@@ -2374,17 +2473,9 @@ async function handlePost(req, res, pathname) {
   }
   if (pathname === "/admin/sharing/product-introducers") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
-    const introducer = orderFoundation.activeMemberByCode(db, body.introducer_code);
-    if (!introducer) return adminSharingPage(req, res, user, "商品引薦人會員編號無效或尚未啟用。");
-    try {
-      sharingFoundation.setProductIntroducer(db, Number(body.product_id), introducer.id, {
-        actorUserId: user.id,
-        reason: String(body.reason || "").trim()
-      });
-      return redirect(res, "/admin/sharing");
-    } catch (error) {
-      return adminSharingPage(req, res, user, error.message);
-    }
+    const product = db.prepare("SELECT product_code FROM products WHERE id = ?").get(Number(body.product_id));
+    const target = product ? `/admin/mall?edit=${encodeURIComponent(product.product_code)}` : "/admin/mall";
+    return redirect(res, `${target}${target.includes("?") ? "&" : "?"}message=${encodeURIComponent("商品引薦人請在商品後台的『分潤相關人員』統一設定。")}`);
   }
   if (pathname === "/member/register") {
     if (!memberFoundation.featureEnabled(db, "member_self_registration")) {
@@ -2633,6 +2724,64 @@ async function handlePost(req, res, pathname) {
     } catch (error) {
       if (isUniqueConstraintError(error)) return adminMallPage(req, res, user, "此商品分類已存在。");
       throw error;
+    }
+  }
+  if (pathname === "/admin/mall/offers") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const product = db.prepare("SELECT product_code FROM products WHERE id = ?").get(Number(body.product_id));
+    if (!product) return adminMallPage(req, res, user, "找不到商品。");
+    try {
+      const distribution = Object.fromEntries(orderFoundation.DISTRIBUTION_ROLES.map((role) => [
+        role,
+        body[`rate_${role}`]
+      ]));
+      const offer = productSettings.saveOffer(db, {
+        productId: body.product_id,
+        offerCode: body.offer_code,
+        displayName: body.display_name,
+        paidQuantity: body.paid_quantity,
+        bonusQuantity: body.bonus_quantity,
+        merchandiseAmount: body.merchandise_amount,
+        shippingAmount: body.shipping_amount,
+        distribution,
+        isActive: body.is_active === "1"
+      });
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&offer=${encodeURIComponent(offer.offer_code)}&message=${encodeURIComponent("成交方案、運費與完整分潤已儲存。")}`);
+    } catch (error) {
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&offer=${encodeURIComponent(String(body.offer_code || ""))}&message=${encodeURIComponent(error.message)}`);
+    }
+  }
+  if (pathname === "/admin/mall/beneficiaries") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const product = db.prepare("SELECT product_code FROM products WHERE id = ?").get(Number(body.product_id));
+    if (!product) return adminMallPage(req, res, user, "找不到商品。");
+    try {
+      productSettings.savePeople(db, {
+        productId: body.product_id,
+        supplierCode: body.supplier_code,
+        contentCode: body.content_code,
+        platformCode: body.platform_code,
+        productIntroducerCode: body.product_introducer_code,
+        actorUserId: user.id
+      });
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&message=${encodeURIComponent("商品分潤相關人員已儲存；後續訂單會建立新快照。")}`);
+    } catch (error) {
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&message=${encodeURIComponent(error.message)}`);
+    }
+  }
+  if (pathname === "/admin/mall/stage-settings") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    const product = db.prepare("SELECT product_code FROM products WHERE id = ?").get(Number(body.product_id));
+    if (!product) return adminMallPage(req, res, user, "找不到商品。");
+    try {
+      productSettings.saveStageSelection(db, {
+        productId: body.product_id,
+        offerCode: body.offer_code,
+        enabled: body.stage_enabled === "1"
+      });
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&message=${encodeURIComponent("Stage 已改為讀取所選成交方案，不再使用獨立測試價格。")}`);
+    } catch (error) {
+      return redirect(res, `/admin/mall?edit=${encodeURIComponent(product.product_code)}&message=${encodeURIComponent(error.message)}`);
     }
   }
   if (pathname === "/admin/mall/products") {

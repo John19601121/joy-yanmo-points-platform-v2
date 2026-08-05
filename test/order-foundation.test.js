@@ -90,18 +90,23 @@ test("stage order snapshots price, distribution and optional sharer", () => {
   const { db, directory } = database();
   const sharer = addActiveMember(db);
   const created = foundation.createStageTestOrder(db, { sharerCode: "lttestsharer" });
-  assert.equal(created.order.total_amount, 600);
+  assert.equal(created.order.subtotal_amount, 200);
+  assert.equal(created.order.shipping_amount, 65);
+  assert.equal(created.order.total_amount, 265);
+  assert.equal(created.order.offer_code, "trial_1");
+  assert.equal(created.item.line_total, 200);
   assert.equal(created.order.environment, "stage");
   assert.equal(created.order.is_test, 1);
   assert.equal(created.order.sharer_member_id, sharer.id);
   assert.deepEqual(JSON.parse(created.item.distribution_json), {
-    supplier: 40, content: 20, sharer: 20, platform: 10, bonus_pool: 10
+    supplier: 40, content: 20, sharer: 20, platform: 10,
+    member_referral: 1, product_introducer: 2, bonus_pool: 7
   });
   assert.equal(db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id = ?").get(created.order.id).count, 1);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
-test("successful signed callback pays once and creates five allocation snapshots", () => {
+test("successful signed callback pays once and creates all seven allocation snapshots", () => {
   const { db, directory } = database();
   const sharer = addActiveMember(db);
   const created = foundation.createStageTestOrder(db, { sharerCode: sharer.member_code });
@@ -114,8 +119,8 @@ test("successful signed callback pays once and creates five allocation snapshots
   assert.equal(db.prepare("SELECT payment_status FROM orders WHERE id = ?").get(created.order.id).payment_status, "paid");
   assert.equal(db.prepare("SELECT COUNT(*) count FROM payment_events WHERE order_id = ? AND provider = 'ecpay'").get(created.order.id).count, 1);
   const allocations = db.prepare("SELECT role, rate, amount, beneficiary_member_id FROM order_allocations WHERE order_id = ? ORDER BY role").all(created.order.id);
-  assert.equal(allocations.length, 5);
-  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 600);
+  assert.equal(allocations.length, 7);
+  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 200);
   assert.equal(allocations.find((allocation) => allocation.role === "sharer").beneficiary_member_id, sharer.id);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
@@ -145,7 +150,7 @@ test("paid order snapshots independent 20%, 1% and 2% relationships from the bon
   const allocations = db.prepare(`SELECT role, rate, amount, beneficiary_member_id
     FROM order_allocations WHERE order_id = ? ORDER BY role`).all(created.order.id);
   assert.equal(allocations.length, 7);
-  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 600);
+  assert.equal(allocations.reduce((sum, allocation) => sum + allocation.amount, 0), 200);
   assert.deepEqual(Object.fromEntries(allocations.map((row) => [row.role, row.rate])), {
     bonus_pool: 7,
     content: 20,
@@ -199,15 +204,43 @@ test("callback rejects bad checksum, wrong amount and wrong merchant without cha
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
-test("unassigned sharer allocation remains visible without inventing a beneficiary", () => {
+test("unassigned dynamic relationship allocations remain visible without inventing beneficiaries", () => {
   const { db, directory } = database();
   const created = foundation.createStageTestOrder(db);
   const callback = signedCallback(created.order);
   foundation.applyEcpayCallback(db, callback.payload, callback.config);
-  const allocation = db.prepare("SELECT * FROM order_allocations WHERE order_id = ? AND role = 'sharer'").get(created.order.id);
-  assert.equal(allocation.amount, 120);
-  assert.equal(allocation.beneficiary_member_id, null);
-  assert.equal(allocation.status, "unassigned");
+  const allocations = db.prepare("SELECT * FROM order_allocations WHERE order_id = ? ORDER BY role").all(created.order.id);
+  assert.equal(allocations.length, 7);
+  const sharer = allocations.find((row) => row.role === "sharer");
+  const referral = allocations.find((row) => row.role === "member_referral");
+  const introducer = allocations.find((row) => row.role === "product_introducer");
+  assert.equal(sharer.amount, 40);
+  assert.equal(sharer.beneficiary_member_id, null);
+  assert.equal(sharer.status, "unassigned");
+  assert.equal(referral.rate, 1);
+  assert.equal(referral.amount, 2);
+  assert.equal(referral.status, "unassigned");
+  assert.equal(introducer.rate, 2);
+  assert.equal(introducer.amount, 4);
+  assert.equal(introducer.status, "unassigned");
+  db.close(); fs.rmSync(directory, { recursive: true });
+});
+
+test("legacy pending orders keep their original five-role distribution behavior", () => {
+  const { db, directory } = database();
+  const created = foundation.createStageTestOrder(db);
+  db.prepare("UPDATE order_items SET distribution_json = ? WHERE id = ?").run(
+    JSON.stringify({ supplier: 40, content: 20, sharer: 20, platform: 10, bonus_pool: 10 }),
+    created.item.id
+  );
+  const callback = signedCallback(created.order);
+  foundation.applyEcpayCallback(db, callback.payload, callback.config);
+  const allocations = db.prepare("SELECT role, rate, amount FROM order_allocations WHERE order_id = ?").all(created.order.id);
+  assert.equal(allocations.length, 5);
+  assert.equal(allocations.some((row) => row.role === "member_referral"), false);
+  assert.equal(allocations.some((row) => row.role === "product_introducer"), false);
+  assert.equal(allocations.find((row) => row.role === "bonus_pool").rate, 10);
+  assert.equal(allocations.reduce((sum, row) => sum + row.amount, 0), 200);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
@@ -317,7 +350,7 @@ test("a pending Production order still settles after new collection is disabled"
   const result = foundation.applyEcpayCallback(db, signed.payload, callbackConfig);
   assert.equal(result.paid, true);
   assert.equal(result.order.payment_status, "paid");
-  assert.equal(db.prepare("SELECT COUNT(*) count FROM order_allocations WHERE order_id = ?").get(created.order.id).count, 5);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM order_allocations WHERE order_id = ?").get(created.order.id).count, 7);
   db.close(); fs.rmSync(directory, { recursive: true });
 });
 
