@@ -1059,10 +1059,11 @@ function renderStoreDashboard(res, user, storeId, adminView = false) {
   const stats = getStats(store.id);
   const pending = db.prepare("SELECT COUNT(*) AS count FROM deduction_requests WHERE store_id = ? AND status = 'pending'").get(store.id).count;
   const members = db.prepare("SELECT COUNT(*) AS count FROM members WHERE store_id = ?").get(store.id).count;
+  const memberListPath = adminView ? `/admin/stores/${store.id}/members` : "/store/members";
   send(res, 200, page(`${adminView ? "分店後台視角：" : ""}${store.store_name}`, `${adminView ? `<div class="notice">目前為總部進入分店視角，資料唯讀瀏覽與一般分店畫面一致。</div>` : ""}
     ${renderStatsCards(stats)}
     <div class="grid split" style="margin-top:16px">
-      <div class="panel"><h2>分店概況</h2><p>會員 ${members} 位，待會員核准扣點 ${pending} 筆。</p><div class="actions"><a class="button" href="/store/members">會員列表</a><a class="button secondary" href="/store/deductions">扣點要求</a></div></div>
+      <div class="panel"><h2>分店概況</h2><p>會員 ${members} 位，待會員核准扣點 ${pending} 筆。</p><div class="actions"><a class="button" href="${memberListPath}">會員列表</a><a class="button secondary" href="/store/deductions">扣點要求</a></div></div>
       <div class="panel"><h2>新增會員</h2>${memberForm()}</div>
     </div>`, user));
 }
@@ -1077,7 +1078,11 @@ function memberForm(error = "", values = {}) {
   </form>`;
 }
 
-function storeMembers(req, res, user) {
+function storeMembers(req, res, user, options = {}) {
+  const adminView = options.adminView === true;
+  const storeId = adminView ? Number(options.storeId) : user.store_id;
+  const store = db.prepare("SELECT * FROM stores WHERE id = ?").get(storeId);
+  if (!store) return send(res, 404, page("找不到分店", `<div class="empty">找不到指定分店。</div>`, user));
   const rows = db.prepare(`
     SELECT m.*, 
       COALESCE(SUM(CASE WHEN pt.type = 'purchase' AND pt.status = 'completed' THEN pt.points ELSE 0 END), 0) AS purchase_points,
@@ -1088,11 +1093,15 @@ function storeMembers(req, res, user) {
     WHERE m.store_id = ?
     GROUP BY m.id
     ORDER BY m.id DESC
-  `).all(user.store_id);
-  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>電話</th><th>購買</th><th>贈予</th><th>剩餘</th><th>操作</th></tr></thead><tbody>${rows.map((m) => `
-    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td><td><a class="button secondary" href="/store/members/${m.id}">詳細</a></td></tr>
+  `).all(storeId);
+  const operationHeader = adminView ? "" : "<th>操作</th>";
+  const table = rows.length ? `<table class="table"><thead><tr><th>會員編號</th><th>會員</th><th>電話</th><th>購買</th><th>贈予</th><th>剩餘</th>${operationHeader}</tr></thead><tbody>${rows.map((m) => `
+    <tr><td>${escapeHtml(m.member_code || "")}</td><td>${escapeHtml(m.name)}<br><span class="muted">${escapeHtml(m.email)}</span></td><td>${escapeHtml(m.phone)}</td><td>${money(m.purchase_points)}</td><td>${money(m.gift_points)}</td><td>${money(m.purchase_points + m.gift_points - m.consume_points)}</td>${adminView ? "" : `<td><a class="button secondary" href="/store/members/${m.id}">詳細</a></td>`}</tr>
   `).join("")}</tbody></table>` : `<div class="empty">尚無會員。</div>`;
-  send(res, 200, page("會員列表", `<div class="actions" style="margin-bottom:16px"><a class="button" href="/store/members/new">新增會員</a></div>${table}`, user));
+  const content = adminView
+    ? `<div class="notice">目前為總部唯讀查看「${escapeHtml(store.store_name)}」的會員資料。</div><div class="actions" style="margin-bottom:16px"><a class="button secondary" href="/admin/stores/${store.id}/view">返回分店視角</a></div>${table}`
+    : `<div class="actions" style="margin-bottom:16px"><a class="button" href="/store/members/new">新增會員</a></div>${table}`;
+  send(res, 200, page(adminView ? `分店會員列表：${store.store_name}` : "會員列表", content, user));
 }
 
 function storeMemberDetail(req, res, user, id) {
@@ -3145,6 +3154,8 @@ async function router(req, res) {
     if (adminStore) { const user = requireUser(req, res, ["admin"]); if (user) return adminStoreDetail(req, res, user, adminStore[1]); return; }
     const adminView = pathname.match(/^\/admin\/stores\/(\d+)\/view$/);
     if (adminView) { const user = requireUser(req, res, ["admin"]); if (user) return renderStoreDashboard(res, user, adminView[1], true); return; }
+    const adminStoreMembers = pathname.match(/^\/admin\/stores\/(\d+)\/members$/);
+    if (adminStoreMembers) { const user = requireUser(req, res, ["admin"]); if (user) return storeMembers(req, res, user, { storeId: adminStoreMembers[1], adminView: true }); return; }
 
     if (pathname === "/store/dashboard") { const user = requireUser(req, res, ["store"]); if (user) return renderStoreDashboard(res, user, user.store_id); return; }
     if (pathname === "/store/mall") { const user = requireUser(req, res, ["store"]); if (user) return mallPage(res, user); return; }
