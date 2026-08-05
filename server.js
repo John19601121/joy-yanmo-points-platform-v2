@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { v2: cloudinary } = require("cloudinary");
 const { applyMigrations } = require("./lib/migrations");
+const catalogBootstrap = require("./lib/catalog-bootstrap");
 const memberFoundation = require("./lib/member-foundation");
 const activationEmail = require("./lib/activation-email");
 const ecpay = require("./lib/ecpay");
@@ -62,6 +63,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec(fs.readFileSync(SCHEMA_PATH, "utf8"));
+catalogBootstrap.ensureDefaultProducts(db);
 runMigrations();
 applyMigrations(db, path.join(ROOT, "migrations"));
 
@@ -200,7 +202,6 @@ function runMigrations() {
   `);
   ensureSuperAdmin();
   backfillMemberCodes();
-  ensureDefaultProducts();
 }
 
 function ensureSuperAdmin() {
@@ -246,19 +247,6 @@ function backfillMemberCodes() {
     while (db.prepare("SELECT id FROM members WHERE member_code = ?").get(code)) code = generateMemberCode();
     db.prepare("UPDATE members SET member_code = ? WHERE id = ?").run(code, row.id);
   }
-}
-
-function ensureDefaultProducts() {
-  const type = db.prepare("SELECT id FROM product_types WHERE name = ?").get("用品")
-    || db.prepare("INSERT INTO product_types (name, sort_order, is_active) VALUES (?, 10, 1) RETURNING id").get("用品");
-  const category = db.prepare("SELECT id FROM product_categories WHERE type_id = ? AND name = ?").get(type.id, "清潔用品")
-    || db.prepare("INSERT INTO product_categories (type_id, name, sort_order, is_active) VALUES (?, ?, 10, 1) RETURNING id").get(type.id, "清潔用品");
-  const existing = db.prepare("SELECT id FROM products WHERE product_code = ?").get("SOAP001");
-  if (existing) return;
-  db.prepare(`
-    INSERT INTO products (product_code, name, type_id, category_id, short_description, product_page_url, price, currency, payment_provider, is_active, sort_order)
-    VALUES ('SOAP001', '烏金炭皂', ?, ?, '深層清潔、溫和調理的黑金炭皂', 'https://opx-1.my.canva.site/daho3zigbkc', NULL, 'TWD', 'ecpay', 1, 10)
-  `).run(type.id, category.id);
 }
 
 function verifyPassword(password, stored) {

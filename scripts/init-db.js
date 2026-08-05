@@ -3,6 +3,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { applyMigrations } = require("../lib/migrations");
+const catalogBootstrap = require("../lib/catalog-bootstrap");
 
 const root = path.join(__dirname, "..");
 loadEnv(path.join(root, ".env"));
@@ -15,6 +16,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec(fs.readFileSync(schemaPath, "utf8"));
+catalogBootstrap.ensureDefaultProducts(db);
 applyMigrations(db, path.join(root, "migrations"));
 
 function loadEnv(filePath) {
