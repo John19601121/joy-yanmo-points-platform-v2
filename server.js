@@ -1060,11 +1060,17 @@ function renderStoreDashboard(res, user, storeId, adminView = false) {
   const pending = db.prepare("SELECT COUNT(*) AS count FROM deduction_requests WHERE store_id = ? AND status = 'pending'").get(store.id).count;
   const members = db.prepare("SELECT COUNT(*) AS count FROM members WHERE store_id = ?").get(store.id).count;
   const memberListPath = adminView ? `/admin/stores/${store.id}/members` : "/store/members";
+  const storeActions = adminView
+    ? `<a class="button" href="${memberListPath}">會員列表</a>`
+    : `<a class="button" href="${memberListPath}">會員列表</a><a class="button secondary" href="/store/deductions">扣點要求</a>`;
+  const memberCreationPanel = adminView
+    ? ""
+    : `<div class="panel"><h2>新增會員</h2>${memberForm()}</div>`;
   send(res, 200, page(`${adminView ? "分店後台視角：" : ""}${store.store_name}`, `${adminView ? `<div class="notice">目前為總部進入分店視角，資料唯讀瀏覽與一般分店畫面一致。</div>` : ""}
     ${renderStatsCards(stats)}
-    <div class="grid split" style="margin-top:16px">
-      <div class="panel"><h2>分店概況</h2><p>會員 ${members} 位，待會員核准扣點 ${pending} 筆。</p><div class="actions"><a class="button" href="${memberListPath}">會員列表</a><a class="button secondary" href="/store/deductions">扣點要求</a></div></div>
-      <div class="panel"><h2>新增會員</h2>${memberForm()}</div>
+    <div class="grid${adminView ? "" : " split"}" style="margin-top:16px">
+      <div class="panel"><h2>分店概況</h2><p>會員 ${members} 位，待會員核准扣點 ${pending} 筆。</p><div class="actions">${storeActions}</div></div>
+      ${memberCreationPanel}
     </div>`, user));
 }
 

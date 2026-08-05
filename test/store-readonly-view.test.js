@@ -80,6 +80,24 @@ test("headquarters read-only store view can list only that store's members", asy
   assert.equal(dashboard.status, 200);
   const dashboardHtml = await dashboard.text();
   assert.match(dashboardHtml, new RegExp(`/admin/stores/${targetStore.id}/members`));
+  assert.doesNotMatch(dashboardHtml, /href="\/store\/deductions"/);
+  assert.doesNotMatch(dashboardHtml, /action="\/store\/members"/);
+  assert.doesNotMatch(dashboardHtml, /<h2>新增會員<\/h2>/);
+
+  const storeLogin = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ role: "store", email: "taipei@lt-health-sales.test", password: "password123" })
+  });
+  assert.equal(storeLogin.status, 302);
+  const storeCookie = storeLogin.headers.get("set-cookie").split(";", 1)[0];
+  const storeDashboard = await fetch(`${baseUrl}/store/dashboard`, { headers: { cookie: storeCookie } });
+  assert.equal(storeDashboard.status, 200);
+  const storeDashboardHtml = await storeDashboard.text();
+  assert.match(storeDashboardHtml, /href="\/store\/deductions"/);
+  assert.match(storeDashboardHtml, /action="\/store\/members"/);
+  assert.match(storeDashboardHtml, /<h2>新增會員<\/h2>/);
 
   const memberList = await fetch(`${baseUrl}/admin/stores/${targetStore.id}/members`, { headers: { cookie } });
   assert.equal(memberList.status, 200);
