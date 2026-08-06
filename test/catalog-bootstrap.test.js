@@ -28,8 +28,9 @@ function emptyDatabase() {
 }
 
 function assertCatalogReady(db) {
-  const product = db.prepare("SELECT id, price FROM products WHERE product_code = 'SOAP001'").get();
+  const product = db.prepare("SELECT id, price, product_page_url FROM products WHERE product_code = 'SOAP001'").get();
   assert.equal(product.price, 600);
+  assert.equal(product.product_page_url, "https://lt-health.com.tw/products/content/wujin-soap");
   const config = db.prepare("SELECT * FROM product_checkout_configs WHERE product_id = ?").get(product.id);
   assert.equal(config.stage_price, null);
   assert.equal(config.stage_offer_code, "trial_1");
@@ -57,7 +58,7 @@ test("fresh initialization bootstraps SOAP001 before catalog migrations and is r
   assert.equal(db.prepare("SELECT COUNT(*) count FROM products WHERE product_code = 'SOAP001'").get().count, 1);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM product_checkout_configs").get().count, 1);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM product_checkout_offers").get().count, 4);
-  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 10);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 11);
   db.close();
   fs.rmSync(directory, { recursive: true });
 });
@@ -80,8 +81,22 @@ test("migration 010 repairs a database where migrations 001-009 ran before SOAP0
   assertCatalogReady(db);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM product_checkout_configs").get().count, 1);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM product_checkout_offers").get().count, 4);
-  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 10);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 11);
   db.close();
   fs.rmSync(directory, { recursive: true });
   fs.rmSync(oldMigrationsDir, { recursive: true });
+});
+
+test("official product page migration preserves an administrator-customized URL", () => {
+  const { db, directory } = emptyDatabase();
+  ensureDefaultProducts(db);
+  db.prepare("UPDATE products SET product_page_url = ? WHERE product_code = 'SOAP001'")
+    .run("https://example.test/custom-soap");
+  applyMigrations(db, migrationsDir);
+  assert.equal(
+    db.prepare("SELECT product_page_url FROM products WHERE product_code = 'SOAP001'").get().product_page_url,
+    "https://example.test/custom-soap"
+  );
+  db.close();
+  fs.rmSync(directory, { recursive: true });
 });

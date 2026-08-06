@@ -1189,6 +1189,12 @@ function publicBaseUrl(req) {
   return `${protocol}://${req.headers.host}`;
 }
 
+function productReferralUrl(productPageUrl, memberCode) {
+  const target = new URL(productPageUrl);
+  target.searchParams.set("ref", memberCode);
+  return target.toString();
+}
+
 function eventRegistrationPage(event, shareToken = "", message = "", completed = false) {
   return page("活動報名", `<div class="login">
     <section class="login-card">
@@ -1290,6 +1296,66 @@ function adminSharingPage(req, res, user, message = "") {
 function memberShareCenter(req, res, user) {
   const member = db.prepare("SELECT * FROM members WHERE user_id = ?").get(user.id);
   if (!member) return send(res, 404, page("找不到會員資料", `<div class="empty">此帳號尚未連結會員資料。</div>`, user));
+  const payoutRoleLabels = {
+    supplier: "供應商",
+    content: "內容製作者",
+    sharer: "商品成交分享者",
+    platform: "平台營運",
+    member_referral: "永久推薦人",
+    product_introducer: "商品引薦人",
+    bonus_pool: "獎勵池"
+  };
+  const payoutStatusLabels = {
+    pending: "待確認",
+    confirmed: "已確認",
+    payable: "待撥款",
+    paid: "已結算",
+    converted_to_token: "已轉為點數",
+    reversed: "已沖回",
+    cancelled: "已取消"
+  };
+  const payoutRows = db.prepare(`
+    SELECT allocations.role, allocations.rate, allocations.amount, allocations.status,
+      orders.order_no, orders.paid_at, orders.created_at AS order_created_at,
+      items.product_code, items.product_name
+    FROM order_allocations allocations
+    JOIN orders ON orders.id = allocations.order_id
+    JOIN order_items items ON items.id = allocations.order_item_id
+    WHERE allocations.beneficiary_member_id = ?
+      AND orders.environment = 'production'
+      AND orders.is_test = 0
+      AND orders.payment_status = 'paid'
+    ORDER BY COALESCE(orders.paid_at, orders.created_at) DESC, allocations.id DESC
+  `).all(member.id);
+  const stagePayoutRows = db.prepare(`
+    SELECT allocations.role, allocations.rate, allocations.amount, allocations.status,
+      orders.order_no, orders.paid_at, orders.created_at AS order_created_at,
+      items.product_code, items.product_name
+    FROM order_allocations allocations
+    JOIN orders ON orders.id = allocations.order_id
+    JOIN order_items items ON items.id = allocations.order_item_id
+    WHERE allocations.beneficiary_member_id = ?
+      AND orders.environment = 'stage'
+      AND orders.is_test = 1
+      AND orders.payment_status = 'paid'
+    ORDER BY COALESCE(orders.paid_at, orders.created_at) DESC, allocations.id DESC
+  `).all(member.id);
+  const activePayoutRows = payoutRows.filter((row) => !["reversed", "cancelled"].includes(row.status));
+  const pendingPayoutStatuses = new Set(["pending", "confirmed", "payable"]);
+  const settledPayoutStatuses = new Set(["paid", "converted_to_token"]);
+  const payoutTotal = activePayoutRows.reduce((sum, row) => sum + row.amount, 0);
+  const payoutPending = activePayoutRows.filter((row) => pendingPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0);
+  const payoutSettled = activePayoutRows.filter((row) => settledPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0);
+  const payoutByRole = Object.entries(payoutRoleLabels).map(([role, label]) => {
+    const rows = activePayoutRows.filter((row) => row.role === role);
+    return {
+      role,
+      label,
+      total: rows.reduce((sum, row) => sum + row.amount, 0),
+      pending: rows.filter((row) => pendingPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0),
+      settled: rows.filter((row) => settledPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0)
+    };
+  });
   const memberCode = member.member_code || "";
   const url = new URL(req.url, `http://${req.headers.host}`);
   const productCode = String(url.searchParams.get("product") || "").trim().toUpperCase();
@@ -1313,9 +1379,51 @@ function memberShareCenter(req, res, user) {
     : event
       ? ensureShareLink(member.id, "event", { eventId: event.id })
       : ensureShareLink(member.id, "member");
-  const shareUrl = `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
+  const shareUrl = product
+    ? productReferralUrl(product.product_page_url, memberCode)
+    : `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
+  const activeProducts = db.prepare(`SELECT product_code, name FROM products
+    WHERE is_active = 1 ORDER BY sort_order, id`).all();
   const activeEvents = db.prepare("SELECT * FROM platform_events WHERE registration_open = 1 ORDER BY id DESC").all();
-  send(res, 200, page("我的成交中心", `<div class="panel">
+  send(res, 200, page("我的成交中心", `<section id="my-payouts">
+    <div class="actions" style="margin-bottom:16px">
+      <a class="button" href="#my-payouts">我的分潤</a>
+      <a class="button secondary" href="#share-tools">分享工具</a>
+    </div>
+    <div class="grid cards">
+      <div class="card metric">累計分潤<strong>NT$ ${money(payoutTotal)}</strong></div>
+      <div class="card metric">待結算<strong>NT$ ${money(payoutPending)}</strong></div>
+      <div class="card metric">已結算<strong>NT$ ${money(payoutSettled)}</strong></div>
+    </div>
+    <div class="grid split" style="margin-top:16px">
+      <div class="panel">
+        <h2 style="margin-top:0">各角色收入</h2>
+        <table class="table"><thead><tr><th>分潤角色</th><th>累計</th><th>待結算</th><th>已結算</th></tr></thead><tbody>${payoutByRole.map((row) =>
+          `<tr><td>${escapeHtml(row.label)}</td><td>NT$ ${money(row.total)}</td><td>NT$ ${money(row.pending)}</td><td>NT$ ${money(row.settled)}</td></tr>`
+        ).join("")}</tbody></table>
+      </div>
+      <div class="panel">
+        <h2 style="margin-top:0">分潤說明</h2>
+        <p>待結算包含待確認、已確認及待撥款；已結算包含已撥款或已轉為點數。</p>
+        <p class="muted">只計入正式環境且付款成功的訂單。測試訂單、已取消及已沖回的分潤不列入金額。</p>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2 style="margin-top:0">訂單分潤明細</h2>
+      ${payoutRows.length ? `<table class="table"><thead><tr><th>訂單日期</th><th>訂單編號</th><th>商品</th><th>收入角色</th><th>比例</th><th>分潤金額</th><th>狀態</th></tr></thead><tbody>${payoutRows.map((row) =>
+        `<tr><td>${escapeHtml(row.paid_at || row.order_created_at)}</td><td>${escapeHtml(row.order_no)}</td><td>${escapeHtml(row.product_code)}｜${escapeHtml(row.product_name)}</td><td>${escapeHtml(payoutRoleLabels[row.role] || row.role)}</td><td>${row.rate}%</td><td>NT$ ${money(row.amount)}</td><td><span class="badge">${escapeHtml(payoutStatusLabels[row.status] || row.status)}</span></td></tr>`
+      ).join("")}</tbody></table>` : `<div class="empty">目前尚無正式付款成功的分潤紀錄。成交並完成付款後，分潤會顯示在這裡。</div>`}
+    </div>
+    ${stagePayoutRows.length ? `<div class="panel" style="margin-top:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 測試分潤（不可請領）</h2>
+      <div class="notice" style="background:#fff3cd;border-color:#ead28a;color:#6b5316"><b>僅供驗收：</b>以下是測試訂單的展示資料，不計入上方累計、待結算或已結算，也不代表任何可請領款項。</div>
+      <table class="table"><thead><tr><th>測試訂單日期</th><th>測試訂單編號</th><th>商品</th><th>測試角色</th><th>比例</th><th>測試金額</th><th>狀態</th></tr></thead><tbody>${stagePayoutRows.map((row) =>
+        `<tr><td>${escapeHtml(row.paid_at || row.order_created_at)}</td><td><span class="badge">測試</span> ${escapeHtml(row.order_no)}</td><td>${escapeHtml(row.product_code)}｜${escapeHtml(row.product_name)}</td><td>${escapeHtml(payoutRoleLabels[row.role] || row.role)}</td><td>${row.rate}%</td><td>測試 NT$ ${money(row.amount)}</td><td><span class="badge">${escapeHtml(payoutStatusLabels[row.status] || row.status)}</span></td></tr>`
+      ).join("")}</tbody></table>
+    </div>` : ""}
+  </section>
+  <div id="share-tools" class="panel" style="margin-top:16px">
+    <h2 style="margin-top:0">分享工具</h2>
     <p class="muted">會員、商品、活動三種連結各自記錄；活動邀請不會產生商品20%分潤。</p>
     ${product ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
       <h2 style="margin-top:0">${escapeHtml(product.name)}</h2>
@@ -1326,10 +1434,11 @@ function memberShareCenter(req, res, user) {
     ${event ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7"><h2>${escapeHtml(event.title)}</h2><p>完成活動報名後，對尚未成為會員者建立30天邀請保護。</p></div>` : ""}
     <div class="actions" style="margin-bottom:16px">
       <a class="button secondary" href="/member/share-center">分享加入會員</a>
+      ${activeProducts.map((item) => `<a class="button secondary" href="/member/share-center?product=${encodeURIComponent(item.product_code)}">分享商品：${escapeHtml(item.name)}</a>`).join("")}
       ${activeEvents.map((item) => `<a class="button secondary" href="/member/share-center?event=${item.id}">分享活動：${escapeHtml(item.title)}</a>`).join("")}
     </div>
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
-    <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
+    <div class="field" style="margin-top:14px"><label>${product ? "商品分享網址（官網商品頁＋會員編號）" : event ? "活動分享網址" : "會員邀請網址"}</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
     <div class="actions" style="margin-top:16px">
       <button class="button" type="button" onclick="copyShareUrl()">複製網址</button>
       <button class="button secondary" type="button" onclick="shareToLine()">LINE 分享</button>
@@ -1607,7 +1716,69 @@ function productionCheckoutPage(req, res, productCode, {
   </div>`), { "Cache-Control": "no-store" });
 }
 
-function adminOrdersPage(req, res, user, message = "") {
+function stagePayoutAcceptanceAllowed() {
+  const config = ecpay.paymentConfig();
+  return config.mode === "stage"
+    && process.env.ECPAY_STAGE_ENABLED === "true"
+    && process.env.ECPAY_PRODUCTION_ENABLED !== "true"
+    && process.env.ECPAY_PRODUCTION_CREDIT_ENABLED !== "true";
+}
+
+function createStagePayoutAcceptanceData(actorUserId) {
+  if (!stagePayoutAcceptanceAllowed()) throw new Error("安全檢查未通過：只能在 Stage 且正式收款保持關閉時建立驗收資料。");
+  const email = "stage.payout.qa@lt-health-sales.test";
+  const memberCode = "LTSTAGEQA001";
+  const orderNo = "STAGEQA-PAYOUT-20260806";
+  if (db.prepare("SELECT id FROM users WHERE lower(email) = lower(?)").get(email)
+    || db.prepare("SELECT id FROM members WHERE member_code = ?").get(memberCode)
+    || db.prepare("SELECT id FROM orders WHERE order_no = ?").get(orderNo)) {
+    throw new Error("Stage 驗收資料已存在；為保護密碼，不會重設或再次顯示。若需要新密碼，請另行核准重建驗收帳號。");
+  }
+  const store = db.prepare("SELECT id FROM stores ORDER BY id LIMIT 1").get();
+  const product = db.prepare("SELECT id, product_code, name FROM products WHERE product_code = 'SOAP001' LIMIT 1").get()
+    || db.prepare("SELECT id, product_code, name FROM products ORDER BY id LIMIT 1").get();
+  if (!store || !product) throw new Error("Stage 尚未具備建立驗收資料所需的分店或商品。");
+  const temporaryPassword = generateTemporaryPassword();
+  const distributions = { supplier: 40, content: 20, sharer: 20, platform: 10, member_referral: 1, product_introducer: 2, bonus_pool: 7 };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const account = db.prepare(`INSERT INTO users
+      (role, name, phone, email, password_hash, store_id, status)
+      VALUES ('member', 'Stage 分潤驗收會員', '0900000001', ?, ?, ?, 'active') RETURNING id`)
+      .get(email, hashPassword(temporaryPassword), store.id);
+    const member = db.prepare(`INSERT INTO members
+      (store_id, user_id, member_code, name, phone, email)
+      VALUES (?, ?, ?, 'Stage 分潤驗收會員', '0900000001', ?) RETURNING id`)
+      .get(store.id, account.id, memberCode, email);
+    db.prepare(`INSERT INTO member_profiles
+      (member_id, normalized_email, normalized_phone, activation_status)
+      VALUES (?, ?, '0900000001', 'active')`).run(member.id, email);
+    const order = db.prepare(`INSERT INTO orders
+      (order_no, environment, is_test, buyer_member_id, buyer_name, buyer_phone, buyer_email,
+       sharer_member_id, total_amount, order_status, payment_status, payment_provider,
+       payment_method, created_by_user_id, paid_at)
+      VALUES (?, 'stage', 1, ?, 'Stage 驗收買家', '0900000001', ?, ?, 1000,
+       'completed', 'paid', 'stage_acceptance', 'stage_demo', ?, CURRENT_TIMESTAMP) RETURNING id`)
+      .get(orderNo, member.id, email, member.id, actorUserId);
+    const item = db.prepare(`INSERT INTO order_items
+      (order_id, product_id, product_code, product_name, quantity, unit_price, line_total, distribution_json)
+      VALUES (?, ?, ?, ?, 1, 1000, 1000, ?) RETURNING id`)
+      .get(order.id, product.id, product.product_code, product.name, JSON.stringify(distributions));
+    const allocation = db.prepare(`INSERT INTO order_allocations
+      (order_id, order_item_id, role, beneficiary_member_id, rate, amount, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'paid')`);
+    for (const [role, rate] of Object.entries(distributions)) {
+      allocation.run(order.id, item.id, role, member.id, rate, Math.floor(1000 * rate / 100));
+    }
+    db.exec("COMMIT");
+    return { email, memberCode, orderNo, temporaryPassword };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function adminOrdersPage(req, res, user, message = "", acceptanceCredentials = null) {
   const config = ecpay.paymentConfig();
   const stageStatus = ecpay.stageCheckoutReadiness();
   const productionConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "production" });
@@ -1652,6 +1823,14 @@ function adminOrdersPage(req, res, user, message = "") {
       <td>${escapeHtml(order.created_at)}</td>
     </tr>`).join("")}</tbody></table>` : `<div class="empty">尚無 Render 核心訂單。</div>`;
   send(res, 200, page("訂單中心", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+    ${acceptanceCredentials ? `<section class="panel" style="margin-bottom:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 驗收會員已建立（密碼僅顯示這一次）</h2>
+      <p><b>登入 Email：</b>${escapeHtml(acceptanceCredentials.email)}</p>
+      <p><b>會員編號：</b>${escapeHtml(acceptanceCredentials.memberCode)}</p>
+      <p><b>一次性臨時密碼：</b><code>${escapeHtml(acceptanceCredentials.temporaryPassword)}</code></p>
+      <p><b>測試訂單：</b>${escapeHtml(acceptanceCredentials.orderNo)}</p>
+      <p class="muted">請立即安全保存臨時密碼，登入後更換。此帳號及訂單只存在 Stage，測試分潤不可請領。</p>
+    </section>` : ""}
     <div class="grid split">
       <section class="panel">
         <h2>綠界測試環境</h2>
@@ -1675,6 +1854,13 @@ function adminOrdersPage(req, res, user, message = "") {
           </form>` : `<div class="empty">尚未建立測試商品設定。</div>`}
       </section>
     </div>
+    ${stagePayoutAcceptanceAllowed() && isSuperAdmin(user) ? `<section class="panel" style="margin-top:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 分潤展示資料</h2>
+      <p>建立一個全新 Stage 專用會員、一次性密碼、測試訂單及七角色測試分潤。正式收款開啟時此功能會自動禁用。</p>
+      <form method="post" action="/admin/orders/stage-payout-acceptance">
+        <button class="button" type="submit">建立 Stage 驗收會員與測試分潤</button>
+      </form>
+    </section>` : ""}
     <section class="panel" style="margin-top:16px">
       <h2>最近訂單</h2>
       ${orderRows}
@@ -2402,6 +2588,16 @@ async function handlePost(req, res, pathname) {
       return productionCheckoutPage(req, res, productCode, { error: error.message, values: body, status: 400 });
     }
   }
+  if (pathname === "/admin/orders/stage-payout-acceptance") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (!isSuperAdmin(user)) return send(res, 403, page("無權限", `<div class="empty">只有總部專職管理員可以建立 Stage 驗收資料。</div>`, user));
+    try {
+      const credentials = createStagePayoutAcceptanceData(user.id);
+      return adminOrdersPage(req, res, user, "Stage 驗收會員與測試分潤已建立。", credentials);
+    } catch (error) {
+      return adminOrdersPage(req, res, user, error.message);
+    }
+  }
   if (pathname === "/admin/orders/test") {
     const user = requireUser(req, res, ["admin"]); if (!user) return;
     try {
@@ -3105,6 +3301,29 @@ async function router(req, res) {
     if (pathname === "/payment/result") {
       return send(res, 200, publicPaymentResultPage(url.searchParams.get("order") || ""), { "Cache-Control": "no-store" });
     }
+    const productShareMatch = pathname.match(/^\/share\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
+    if (productShareMatch) {
+      const productCode = productShareMatch[1].toUpperCase();
+      const memberCode = productShareMatch[2].toUpperCase();
+      const product = db.prepare("SELECT id, product_code, product_page_url FROM products WHERE product_code = ? AND is_active = 1 LIMIT 1").get(productCode);
+      const member = db.prepare(`SELECT members.id, members.member_code
+        FROM members
+        JOIN users ON users.id = members.user_id
+        LEFT JOIN member_profiles profiles ON profiles.member_id = members.id
+        WHERE members.member_code = ? AND users.status = 'active'
+          AND COALESCE(profiles.activation_status, 'active') = 'active'
+        LIMIT 1`).get(memberCode);
+      if (!product || !member) {
+        return send(res, 404, page("商品分享連結無效", `<div class="empty">商品不存在、尚未上架，或分享會員無效。</div>`));
+      }
+      const link = ensureShareLink(member.id, "product", { productId: product.id });
+      const ipHash = crypto.createHash("sha256").update(`${SESSION_SECRET}:${clientIp(req)}`).digest("hex");
+      sharingFoundation.recordShareClick(db, link.token, {
+        ipHash,
+        userAgent: req.headers["user-agent"] || ""
+      });
+      return redirect(res, productReferralUrl(product.product_page_url, member.member_code));
+    }
     const shareMatch = pathname.match(/^\/s\/([A-Za-z0-9_-]+)$/);
     if (shareMatch) {
       try {
@@ -3117,7 +3336,9 @@ async function router(req, res) {
           return redirect(res, `/member/register?ref=${encodeURIComponent(link.sharer_code)}`);
         }
         if (link.link_type === "product") {
-          return redirect(res, `https://tally.so/r/1A5eO4?product=${encodeURIComponent(link.product_code)}&ref=${encodeURIComponent(link.sharer_code)}`);
+          const product = db.prepare("SELECT product_page_url FROM products WHERE id = ? AND is_active = 1 LIMIT 1").get(link.product_id);
+          if (!product) throw new Error("Shared product is invalid or inactive.");
+          return redirect(res, productReferralUrl(product.product_page_url, link.sharer_code));
         }
         return redirect(res, `/events/${link.event_id}/register?share=${encodeURIComponent(link.token)}`);
       } catch {
