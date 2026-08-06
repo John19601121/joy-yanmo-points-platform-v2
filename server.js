@@ -1321,6 +1321,19 @@ function memberShareCenter(req, res, user) {
       AND orders.payment_status = 'paid'
     ORDER BY COALESCE(orders.paid_at, orders.created_at) DESC, allocations.id DESC
   `).all(member.id);
+  const stagePayoutRows = db.prepare(`
+    SELECT allocations.role, allocations.rate, allocations.amount, allocations.status,
+      orders.order_no, orders.paid_at, orders.created_at AS order_created_at,
+      items.product_code, items.product_name
+    FROM order_allocations allocations
+    JOIN orders ON orders.id = allocations.order_id
+    JOIN order_items items ON items.id = allocations.order_item_id
+    WHERE allocations.beneficiary_member_id = ?
+      AND orders.environment = 'stage'
+      AND orders.is_test = 1
+      AND orders.payment_status = 'paid'
+    ORDER BY COALESCE(orders.paid_at, orders.created_at) DESC, allocations.id DESC
+  `).all(member.id);
   const activePayoutRows = payoutRows.filter((row) => !["reversed", "cancelled"].includes(row.status));
   const pendingPayoutStatuses = new Set(["pending", "confirmed", "payable"]);
   const settledPayoutStatuses = new Set(["paid", "converted_to_token"]);
@@ -1391,6 +1404,13 @@ function memberShareCenter(req, res, user) {
         `<tr><td>${escapeHtml(row.paid_at || row.order_created_at)}</td><td>${escapeHtml(row.order_no)}</td><td>${escapeHtml(row.product_code)}｜${escapeHtml(row.product_name)}</td><td>${escapeHtml(payoutRoleLabels[row.role] || row.role)}</td><td>${row.rate}%</td><td>NT$ ${money(row.amount)}</td><td><span class="badge">${escapeHtml(payoutStatusLabels[row.status] || row.status)}</span></td></tr>`
       ).join("")}</tbody></table>` : `<div class="empty">目前尚無正式付款成功的分潤紀錄。成交並完成付款後，分潤會顯示在這裡。</div>`}
     </div>
+    ${stagePayoutRows.length ? `<div class="panel" style="margin-top:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 測試分潤（不可請領）</h2>
+      <div class="notice" style="background:#fff3cd;border-color:#ead28a;color:#6b5316"><b>僅供驗收：</b>以下是測試訂單的展示資料，不計入上方累計、待結算或已結算，也不代表任何可請領款項。</div>
+      <table class="table"><thead><tr><th>測試訂單日期</th><th>測試訂單編號</th><th>商品</th><th>測試角色</th><th>比例</th><th>測試金額</th><th>狀態</th></tr></thead><tbody>${stagePayoutRows.map((row) =>
+        `<tr><td>${escapeHtml(row.paid_at || row.order_created_at)}</td><td><span class="badge">測試</span> ${escapeHtml(row.order_no)}</td><td>${escapeHtml(row.product_code)}｜${escapeHtml(row.product_name)}</td><td>${escapeHtml(payoutRoleLabels[row.role] || row.role)}</td><td>${row.rate}%</td><td>測試 NT$ ${money(row.amount)}</td><td><span class="badge">${escapeHtml(payoutStatusLabels[row.status] || row.status)}</span></td></tr>`
+      ).join("")}</tbody></table>
+    </div>` : ""}
   </section>
   <div id="share-tools" class="panel" style="margin-top:16px">
     <h2 style="margin-top:0">分享工具</h2>

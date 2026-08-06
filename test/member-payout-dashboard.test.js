@@ -114,8 +114,9 @@ test("member share center shows only the member's production payout dashboard", 
   assert.match(html, /PROD-PAID/);
   assert.match(html, /供應商/);
   assert.match(html, /商品成交分享者/);
-  assert.doesNotMatch(html, /STAGE-HIDDEN/);
+  assert.match(html, /Stage 測試分潤（不可請領）/);
+  assert.match(html, /STAGE-HIDDEN/);
+  assert.match(html, /測試 NT\$ 999/);
   assert.doesNotMatch(html, /OTHER-HIDDEN/);
-  assert.doesNotMatch(html, /NT\$ 999/);
   assert.doesNotMatch(html, /NT\$ 888/);
 });
