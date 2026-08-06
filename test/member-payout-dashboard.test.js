@@ -44,7 +44,12 @@ test("member share center shows only the member's production payout dashboard", 
     PORT: String(port),
     NODE_ENV: "test",
     COOKIE_SECURE: "false",
-    SESSION_SECRET: "member-payout-test-secret-32-chars"
+    SESSION_SECRET: "member-payout-test-secret-32-chars",
+    INITIAL_ADMIN_EMAIL: "admin@lt-health-sales.test",
+    ECPAY_MODE: "stage",
+    ECPAY_STAGE_ENABLED: "true",
+    ECPAY_PRODUCTION_ENABLED: "false",
+    ECPAY_PRODUCTION_CREDIT_ENABLED: "false"
   };
 
   const seeded = spawnSync(process.execPath, ["scripts/seed.js"], { cwd: root, env, encoding: "utf8" });
@@ -94,6 +99,51 @@ test("member share center shows only the member's production payout dashboard", 
 
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitUntilReady(baseUrl, child);
+  const adminLogin = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ role: "admin", email: "admin@lt-health-sales.test", password: "password123" })
+  });
+  assert.equal(adminLogin.status, 302);
+  const adminCookie = adminLogin.headers.get("set-cookie").split(";", 1)[0];
+  const acceptanceCreation = await fetch(`${baseUrl}/admin/orders/stage-payout-acceptance`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { cookie: adminCookie, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams()
+  });
+  assert.equal(acceptanceCreation.status, 200);
+  const acceptanceHtml = await acceptanceCreation.text();
+  assert.match(acceptanceHtml, /Stage 驗收會員已建立（密碼僅顯示這一次）/);
+  assert.match(acceptanceHtml, /stage\.payout\.qa@lt-health-sales\.test/);
+  assert.match(acceptanceHtml, /LTSTAGEQA001/);
+  const temporaryPassword = acceptanceHtml.match(/一次性臨時密碼：<\/b><code>([^<]+)<\/code>/)?.[1];
+  assert.ok(temporaryPassword);
+  const duplicateCreation = await fetch(`${baseUrl}/admin/orders/stage-payout-acceptance`, {
+    method: "POST",
+    headers: { cookie: adminCookie, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams()
+  });
+  assert.equal(duplicateCreation.status, 200);
+  assert.match(await duplicateCreation.text(), /Stage 驗收資料已存在/);
+
+  const acceptanceLogin = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ role: "member", email: "stage.payout.qa@lt-health-sales.test", password: temporaryPassword })
+  });
+  assert.equal(acceptanceLogin.status, 302);
+  const acceptanceCookie = acceptanceLogin.headers.get("set-cookie").split(";", 1)[0];
+  const acceptanceDashboard = await fetch(`${baseUrl}/member/share-center`, { headers: { cookie: acceptanceCookie } });
+  assert.equal(acceptanceDashboard.status, 200);
+  const acceptanceDashboardHtml = await acceptanceDashboard.text();
+  assert.match(acceptanceDashboardHtml, /累計分潤<strong>NT\$ 0<\/strong>/);
+  assert.match(acceptanceDashboardHtml, /Stage 測試分潤（不可請領）/);
+  assert.match(acceptanceDashboardHtml, /STAGEQA-PAYOUT-20260806/);
+  assert.match(acceptanceDashboardHtml, /測試 NT\$ 400/);
+
   const login = await fetch(`${baseUrl}/login`, {
     method: "POST",
     redirect: "manual",

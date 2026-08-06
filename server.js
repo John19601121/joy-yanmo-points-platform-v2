@@ -1705,7 +1705,69 @@ function productionCheckoutPage(req, res, productCode, {
   </div>`), { "Cache-Control": "no-store" });
 }
 
-function adminOrdersPage(req, res, user, message = "") {
+function stagePayoutAcceptanceAllowed() {
+  const config = ecpay.paymentConfig();
+  return config.mode === "stage"
+    && process.env.ECPAY_STAGE_ENABLED === "true"
+    && process.env.ECPAY_PRODUCTION_ENABLED !== "true"
+    && process.env.ECPAY_PRODUCTION_CREDIT_ENABLED !== "true";
+}
+
+function createStagePayoutAcceptanceData(actorUserId) {
+  if (!stagePayoutAcceptanceAllowed()) throw new Error("安全檢查未通過：只能在 Stage 且正式收款保持關閉時建立驗收資料。");
+  const email = "stage.payout.qa@lt-health-sales.test";
+  const memberCode = "LTSTAGEQA001";
+  const orderNo = "STAGEQA-PAYOUT-20260806";
+  if (db.prepare("SELECT id FROM users WHERE lower(email) = lower(?)").get(email)
+    || db.prepare("SELECT id FROM members WHERE member_code = ?").get(memberCode)
+    || db.prepare("SELECT id FROM orders WHERE order_no = ?").get(orderNo)) {
+    throw new Error("Stage 驗收資料已存在；為保護密碼，不會重設或再次顯示。若需要新密碼，請另行核准重建驗收帳號。");
+  }
+  const store = db.prepare("SELECT id FROM stores ORDER BY id LIMIT 1").get();
+  const product = db.prepare("SELECT id, product_code, name FROM products WHERE product_code = 'SOAP001' LIMIT 1").get()
+    || db.prepare("SELECT id, product_code, name FROM products ORDER BY id LIMIT 1").get();
+  if (!store || !product) throw new Error("Stage 尚未具備建立驗收資料所需的分店或商品。");
+  const temporaryPassword = generateTemporaryPassword();
+  const distributions = { supplier: 40, content: 20, sharer: 20, platform: 10, member_referral: 1, product_introducer: 2, bonus_pool: 7 };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const account = db.prepare(`INSERT INTO users
+      (role, name, phone, email, password_hash, store_id, status)
+      VALUES ('member', 'Stage 分潤驗收會員', '0900000001', ?, ?, ?, 'active') RETURNING id`)
+      .get(email, hashPassword(temporaryPassword), store.id);
+    const member = db.prepare(`INSERT INTO members
+      (store_id, user_id, member_code, name, phone, email)
+      VALUES (?, ?, ?, 'Stage 分潤驗收會員', '0900000001', ?) RETURNING id`)
+      .get(store.id, account.id, memberCode, email);
+    db.prepare(`INSERT INTO member_profiles
+      (member_id, normalized_email, normalized_phone, activation_status)
+      VALUES (?, ?, '0900000001', 'active')`).run(member.id, email);
+    const order = db.prepare(`INSERT INTO orders
+      (order_no, environment, is_test, buyer_member_id, buyer_name, buyer_phone, buyer_email,
+       sharer_member_id, total_amount, order_status, payment_status, payment_provider,
+       payment_method, created_by_user_id, paid_at)
+      VALUES (?, 'stage', 1, ?, 'Stage 驗收買家', '0900000001', ?, ?, 1000,
+       'completed', 'paid', 'stage_acceptance', 'stage_demo', ?, CURRENT_TIMESTAMP) RETURNING id`)
+      .get(orderNo, member.id, email, member.id, actorUserId);
+    const item = db.prepare(`INSERT INTO order_items
+      (order_id, product_id, product_code, product_name, quantity, unit_price, line_total, distribution_json)
+      VALUES (?, ?, ?, ?, 1, 1000, 1000, ?) RETURNING id`)
+      .get(order.id, product.id, product.product_code, product.name, JSON.stringify(distributions));
+    const allocation = db.prepare(`INSERT INTO order_allocations
+      (order_id, order_item_id, role, beneficiary_member_id, rate, amount, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'paid')`);
+    for (const [role, rate] of Object.entries(distributions)) {
+      allocation.run(order.id, item.id, role, member.id, rate, Math.floor(1000 * rate / 100));
+    }
+    db.exec("COMMIT");
+    return { email, memberCode, orderNo, temporaryPassword };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function adminOrdersPage(req, res, user, message = "", acceptanceCredentials = null) {
   const config = ecpay.paymentConfig();
   const stageStatus = ecpay.stageCheckoutReadiness();
   const productionConfig = ecpay.paymentConfig({ ...process.env, ECPAY_MODE: "production" });
@@ -1750,6 +1812,14 @@ function adminOrdersPage(req, res, user, message = "") {
       <td>${escapeHtml(order.created_at)}</td>
     </tr>`).join("")}</tbody></table>` : `<div class="empty">尚無 Render 核心訂單。</div>`;
   send(res, 200, page("訂單中心", `${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
+    ${acceptanceCredentials ? `<section class="panel" style="margin-bottom:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 驗收會員已建立（密碼僅顯示這一次）</h2>
+      <p><b>登入 Email：</b>${escapeHtml(acceptanceCredentials.email)}</p>
+      <p><b>會員編號：</b>${escapeHtml(acceptanceCredentials.memberCode)}</p>
+      <p><b>一次性臨時密碼：</b><code>${escapeHtml(acceptanceCredentials.temporaryPassword)}</code></p>
+      <p><b>測試訂單：</b>${escapeHtml(acceptanceCredentials.orderNo)}</p>
+      <p class="muted">請立即安全保存臨時密碼，登入後更換。此帳號及訂單只存在 Stage，測試分潤不可請領。</p>
+    </section>` : ""}
     <div class="grid split">
       <section class="panel">
         <h2>綠界測試環境</h2>
@@ -1773,6 +1843,13 @@ function adminOrdersPage(req, res, user, message = "") {
           </form>` : `<div class="empty">尚未建立測試商品設定。</div>`}
       </section>
     </div>
+    ${stagePayoutAcceptanceAllowed() && isSuperAdmin(user) ? `<section class="panel" style="margin-top:16px;border:2px solid #b9964d;background:#fffaf0">
+      <h2 style="margin-top:0">Stage 分潤展示資料</h2>
+      <p>建立一個全新 Stage 專用會員、一次性密碼、測試訂單及七角色測試分潤。正式收款開啟時此功能會自動禁用。</p>
+      <form method="post" action="/admin/orders/stage-payout-acceptance">
+        <button class="button" type="submit">建立 Stage 驗收會員與測試分潤</button>
+      </form>
+    </section>` : ""}
     <section class="panel" style="margin-top:16px">
       <h2>最近訂單</h2>
       ${orderRows}
@@ -2498,6 +2575,16 @@ async function handlePost(req, res, pathname) {
       ), { "Cache-Control": "no-store", "Content-Security-Policy": csp });
     } catch (error) {
       return productionCheckoutPage(req, res, productCode, { error: error.message, values: body, status: 400 });
+    }
+  }
+  if (pathname === "/admin/orders/stage-payout-acceptance") {
+    const user = requireUser(req, res, ["admin"]); if (!user) return;
+    if (!isSuperAdmin(user)) return send(res, 403, page("無權限", `<div class="empty">只有總部專職管理員可以建立 Stage 驗收資料。</div>`, user));
+    try {
+      const credentials = createStagePayoutAcceptanceData(user.id);
+      return adminOrdersPage(req, res, user, "Stage 驗收會員與測試分潤已建立。", credentials);
+    } catch (error) {
+      return adminOrdersPage(req, res, user, error.message);
     }
   }
   if (pathname === "/admin/orders/test") {
