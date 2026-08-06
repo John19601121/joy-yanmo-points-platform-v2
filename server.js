@@ -1373,7 +1373,11 @@ function memberShareCenter(req, res, user) {
     : event
       ? ensureShareLink(member.id, "event", { eventId: event.id })
       : ensureShareLink(member.id, "member");
-  const shareUrl = `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
+  const shareUrl = product
+    ? `${publicBaseUrl(req)}/share/${encodeURIComponent(product.product_code)}/${encodeURIComponent(memberCode)}`
+    : `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
+  const activeProducts = db.prepare(`SELECT product_code, name FROM products
+    WHERE is_active = 1 ORDER BY sort_order, id`).all();
   const activeEvents = db.prepare("SELECT * FROM platform_events WHERE registration_open = 1 ORDER BY id DESC").all();
   send(res, 200, page("我的成交中心", `<section id="my-payouts">
     <div class="actions" style="margin-bottom:16px">
@@ -1424,10 +1428,11 @@ function memberShareCenter(req, res, user) {
     ${event ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7"><h2>${escapeHtml(event.title)}</h2><p>完成活動報名後，對尚未成為會員者建立30天邀請保護。</p></div>` : ""}
     <div class="actions" style="margin-bottom:16px">
       <a class="button secondary" href="/member/share-center">分享加入會員</a>
+      ${activeProducts.map((item) => `<a class="button secondary" href="/member/share-center?product=${encodeURIComponent(item.product_code)}">分享商品：${escapeHtml(item.name)}</a>`).join("")}
       ${activeEvents.map((item) => `<a class="button secondary" href="/member/share-center?event=${item.id}">分享活動：${escapeHtml(item.title)}</a>`).join("")}
     </div>
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
-    <div class="field" style="margin-top:14px"><label>完整分享網址</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
+    <div class="field" style="margin-top:14px"><label>${product ? "商品分享網址（平台網址／商品編號／會員編號）" : event ? "活動分享網址" : "會員邀請網址"}</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
     <div class="actions" style="margin-top:16px">
       <button class="button" type="button" onclick="copyShareUrl()">複製網址</button>
       <button class="button secondary" type="button" onclick="shareToLine()">LINE 分享</button>
@@ -3289,6 +3294,29 @@ async function router(req, res) {
     if (slugLogin) return send(res, 200, loginPage("store", "", slugLogin[1]));
     if (pathname === "/payment/result") {
       return send(res, 200, publicPaymentResultPage(url.searchParams.get("order") || ""), { "Cache-Control": "no-store" });
+    }
+    const productShareMatch = pathname.match(/^\/share\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
+    if (productShareMatch) {
+      const productCode = productShareMatch[1].toUpperCase();
+      const memberCode = productShareMatch[2].toUpperCase();
+      const product = db.prepare("SELECT id, product_code FROM products WHERE product_code = ? AND is_active = 1 LIMIT 1").get(productCode);
+      const member = db.prepare(`SELECT members.id, members.member_code
+        FROM members
+        JOIN users ON users.id = members.user_id
+        LEFT JOIN member_profiles profiles ON profiles.member_id = members.id
+        WHERE members.member_code = ? AND users.status = 'active'
+          AND COALESCE(profiles.activation_status, 'active') = 'active'
+        LIMIT 1`).get(memberCode);
+      if (!product || !member) {
+        return send(res, 404, page("商品分享連結無效", `<div class="empty">商品不存在、尚未上架，或分享會員無效。</div>`));
+      }
+      const link = ensureShareLink(member.id, "product", { productId: product.id });
+      const ipHash = crypto.createHash("sha256").update(`${SESSION_SECRET}:${clientIp(req)}`).digest("hex");
+      sharingFoundation.recordShareClick(db, link.token, {
+        ipHash,
+        userAgent: req.headers["user-agent"] || ""
+      });
+      return redirect(res, `https://tally.so/r/1A5eO4?product=${encodeURIComponent(product.product_code)}&ref=${encodeURIComponent(member.member_code)}`);
     }
     const shareMatch = pathname.match(/^\/s\/([A-Za-z0-9_-]+)$/);
     if (shareMatch) {

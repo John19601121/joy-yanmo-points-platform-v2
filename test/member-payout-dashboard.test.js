@@ -58,7 +58,7 @@ test("member share center shows only the member's production payout dashboard", 
   const db = new DatabaseSync(databasePath);
   db.exec("PRAGMA foreign_keys = ON;");
   applyMigrations(db, path.join(root, "migrations"));
-  const member = db.prepare("SELECT id FROM members WHERE email = 'member.lin@example.com'").get();
+  const member = db.prepare("SELECT id, member_code FROM members WHERE email = 'member.lin@example.com'").get();
   const store = db.prepare("SELECT id FROM stores ORDER BY id LIMIT 1").get();
   const otherUser = db.prepare(`INSERT INTO users (role, name, phone, email, password_hash, store_id)
     VALUES ('member', '其他會員', '0999999999', 'other@example.test', 'unused', ?) RETURNING id`).get(store.id);
@@ -169,4 +169,18 @@ test("member share center shows only the member's production payout dashboard", 
   assert.match(html, /測試 NT\$ 999/);
   assert.doesNotMatch(html, /OTHER-HIDDEN/);
   assert.doesNotMatch(html, /NT\$ 888/);
+
+  const productShareCenter = await fetch(`${baseUrl}/member/share-center?product=PAYOUT001`, { headers: { cookie } });
+  assert.equal(productShareCenter.status, 200);
+  const productShareHtml = await productShareCenter.text();
+  assert.match(productShareHtml, /商品分享網址（平台網址／商品編號／會員編號）/);
+  const shareMemberCode = productShareHtml.match(/\/share\/PAYOUT001\/(LT[A-Z0-9_-]+)/)?.[1];
+  assert.ok(shareMemberCode);
+
+  const productShare = await fetch(`${baseUrl}/share/PAYOUT001/${shareMemberCode}`, { redirect: "manual" });
+  assert.equal(productShare.status, 302);
+  assert.equal(productShare.headers.get("location"), `https://tally.so/r/1A5eO4?product=PAYOUT001&ref=${shareMemberCode}`);
+
+  const invalidProductShare = await fetch(`${baseUrl}/share/UNKNOWN/${shareMemberCode}`);
+  assert.equal(invalidProductShare.status, 404);
 });
