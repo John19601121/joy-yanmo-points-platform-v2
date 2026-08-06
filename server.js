@@ -1290,6 +1290,53 @@ function adminSharingPage(req, res, user, message = "") {
 function memberShareCenter(req, res, user) {
   const member = db.prepare("SELECT * FROM members WHERE user_id = ?").get(user.id);
   if (!member) return send(res, 404, page("找不到會員資料", `<div class="empty">此帳號尚未連結會員資料。</div>`, user));
+  const payoutRoleLabels = {
+    supplier: "供應商",
+    content: "內容製作者",
+    sharer: "商品成交分享者",
+    platform: "平台營運",
+    member_referral: "永久推薦人",
+    product_introducer: "商品引薦人",
+    bonus_pool: "獎勵池"
+  };
+  const payoutStatusLabels = {
+    pending: "待確認",
+    confirmed: "已確認",
+    payable: "待撥款",
+    paid: "已結算",
+    converted_to_token: "已轉為點數",
+    reversed: "已沖回",
+    cancelled: "已取消"
+  };
+  const payoutRows = db.prepare(`
+    SELECT allocations.role, allocations.rate, allocations.amount, allocations.status,
+      orders.order_no, orders.paid_at, orders.created_at AS order_created_at,
+      items.product_code, items.product_name
+    FROM order_allocations allocations
+    JOIN orders ON orders.id = allocations.order_id
+    JOIN order_items items ON items.id = allocations.order_item_id
+    WHERE allocations.beneficiary_member_id = ?
+      AND orders.environment = 'production'
+      AND orders.is_test = 0
+      AND orders.payment_status = 'paid'
+    ORDER BY COALESCE(orders.paid_at, orders.created_at) DESC, allocations.id DESC
+  `).all(member.id);
+  const activePayoutRows = payoutRows.filter((row) => !["reversed", "cancelled"].includes(row.status));
+  const pendingPayoutStatuses = new Set(["pending", "confirmed", "payable"]);
+  const settledPayoutStatuses = new Set(["paid", "converted_to_token"]);
+  const payoutTotal = activePayoutRows.reduce((sum, row) => sum + row.amount, 0);
+  const payoutPending = activePayoutRows.filter((row) => pendingPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0);
+  const payoutSettled = activePayoutRows.filter((row) => settledPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0);
+  const payoutByRole = Object.entries(payoutRoleLabels).map(([role, label]) => {
+    const rows = activePayoutRows.filter((row) => row.role === role);
+    return {
+      role,
+      label,
+      total: rows.reduce((sum, row) => sum + row.amount, 0),
+      pending: rows.filter((row) => pendingPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0),
+      settled: rows.filter((row) => settledPayoutStatuses.has(row.status)).reduce((sum, row) => sum + row.amount, 0)
+    };
+  });
   const memberCode = member.member_code || "";
   const url = new URL(req.url, `http://${req.headers.host}`);
   const productCode = String(url.searchParams.get("product") || "").trim().toUpperCase();
@@ -1315,7 +1362,38 @@ function memberShareCenter(req, res, user) {
       : ensureShareLink(member.id, "member");
   const shareUrl = `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
   const activeEvents = db.prepare("SELECT * FROM platform_events WHERE registration_open = 1 ORDER BY id DESC").all();
-  send(res, 200, page("我的成交中心", `<div class="panel">
+  send(res, 200, page("我的成交中心", `<section id="my-payouts">
+    <div class="actions" style="margin-bottom:16px">
+      <a class="button" href="#my-payouts">我的分潤</a>
+      <a class="button secondary" href="#share-tools">分享工具</a>
+    </div>
+    <div class="grid cards">
+      <div class="card metric">累計分潤<strong>NT$ ${money(payoutTotal)}</strong></div>
+      <div class="card metric">待結算<strong>NT$ ${money(payoutPending)}</strong></div>
+      <div class="card metric">已結算<strong>NT$ ${money(payoutSettled)}</strong></div>
+    </div>
+    <div class="grid split" style="margin-top:16px">
+      <div class="panel">
+        <h2 style="margin-top:0">各角色收入</h2>
+        <table class="table"><thead><tr><th>分潤角色</th><th>累計</th><th>待結算</th><th>已結算</th></tr></thead><tbody>${payoutByRole.map((row) =>
+          `<tr><td>${escapeHtml(row.label)}</td><td>NT$ ${money(row.total)}</td><td>NT$ ${money(row.pending)}</td><td>NT$ ${money(row.settled)}</td></tr>`
+        ).join("")}</tbody></table>
+      </div>
+      <div class="panel">
+        <h2 style="margin-top:0">分潤說明</h2>
+        <p>待結算包含待確認、已確認及待撥款；已結算包含已撥款或已轉為點數。</p>
+        <p class="muted">只計入正式環境且付款成功的訂單。測試訂單、已取消及已沖回的分潤不列入金額。</p>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2 style="margin-top:0">訂單分潤明細</h2>
+      ${payoutRows.length ? `<table class="table"><thead><tr><th>訂單日期</th><th>訂單編號</th><th>商品</th><th>收入角色</th><th>比例</th><th>分潤金額</th><th>狀態</th></tr></thead><tbody>${payoutRows.map((row) =>
+        `<tr><td>${escapeHtml(row.paid_at || row.order_created_at)}</td><td>${escapeHtml(row.order_no)}</td><td>${escapeHtml(row.product_code)}｜${escapeHtml(row.product_name)}</td><td>${escapeHtml(payoutRoleLabels[row.role] || row.role)}</td><td>${row.rate}%</td><td>NT$ ${money(row.amount)}</td><td><span class="badge">${escapeHtml(payoutStatusLabels[row.status] || row.status)}</span></td></tr>`
+      ).join("")}</tbody></table>` : `<div class="empty">目前尚無正式付款成功的分潤紀錄。成交並完成付款後，分潤會顯示在這裡。</div>`}
+    </div>
+  </section>
+  <div id="share-tools" class="panel" style="margin-top:16px">
+    <h2 style="margin-top:0">分享工具</h2>
     <p class="muted">會員、商品、活動三種連結各自記錄；活動邀請不會產生商品20%分潤。</p>
     ${product ? `<div class="panel" style="margin:0 0 16px 0;background:#fbfaf7">
       <h2 style="margin-top:0">${escapeHtml(product.name)}</h2>
