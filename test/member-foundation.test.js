@@ -31,7 +31,7 @@ function addMember(db, suffix, storeId = foundation.headquartersId(db)) {
 test("migrations are idempotent and create one disabled-by-default headquarters foundation", () => {
   const { db, directory } = database();
   applyMigrations(db, path.join(root, "migrations"));
-  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 10);
+  assert.equal(db.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 11);
   assert.equal(db.prepare("SELECT COUNT(*) count FROM stores WHERE is_system_default = 1").get().count, 1);
   assert.deepEqual(db.prepare("SELECT enabled FROM feature_flags ORDER BY name").all().map((row) => row.enabled), [0, 0]);
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
