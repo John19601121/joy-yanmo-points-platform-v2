@@ -1189,6 +1189,12 @@ function publicBaseUrl(req) {
   return `${protocol}://${req.headers.host}`;
 }
 
+function productReferralUrl(productPageUrl, memberCode) {
+  const target = new URL(productPageUrl);
+  target.searchParams.set("ref", memberCode);
+  return target.toString();
+}
+
 function eventRegistrationPage(event, shareToken = "", message = "", completed = false) {
   return page("活動報名", `<div class="login">
     <section class="login-card">
@@ -1374,7 +1380,7 @@ function memberShareCenter(req, res, user) {
       ? ensureShareLink(member.id, "event", { eventId: event.id })
       : ensureShareLink(member.id, "member");
   const shareUrl = product
-    ? `${publicBaseUrl(req)}/share/${encodeURIComponent(product.product_code)}/${encodeURIComponent(memberCode)}`
+    ? productReferralUrl(product.product_page_url, memberCode)
     : `${publicBaseUrl(req)}/s/${encodeURIComponent(link.token)}`;
   const activeProducts = db.prepare(`SELECT product_code, name FROM products
     WHERE is_active = 1 ORDER BY sort_order, id`).all();
@@ -1432,7 +1438,7 @@ function memberShareCenter(req, res, user) {
       ${activeEvents.map((item) => `<a class="button secondary" href="/member/share-center?event=${item.id}">分享活動：${escapeHtml(item.title)}</a>`).join("")}
     </div>
     <div class="field"><label>會員編號</label><input value="${escapeHtml(memberCode)}" readonly></div>
-    <div class="field" style="margin-top:14px"><label>${product ? "商品分享網址（平台網址／商品編號／會員編號）" : event ? "活動分享網址" : "會員邀請網址"}</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
+    <div class="field" style="margin-top:14px"><label>${product ? "商品分享網址（官網商品頁＋會員編號）" : event ? "活動分享網址" : "會員邀請網址"}</label><input id="share-url" value="${escapeHtml(shareUrl)}" readonly></div>
     <div class="actions" style="margin-top:16px">
       <button class="button" type="button" onclick="copyShareUrl()">複製網址</button>
       <button class="button secondary" type="button" onclick="shareToLine()">LINE 分享</button>
@@ -3299,7 +3305,7 @@ async function router(req, res) {
     if (productShareMatch) {
       const productCode = productShareMatch[1].toUpperCase();
       const memberCode = productShareMatch[2].toUpperCase();
-      const product = db.prepare("SELECT id, product_code FROM products WHERE product_code = ? AND is_active = 1 LIMIT 1").get(productCode);
+      const product = db.prepare("SELECT id, product_code, product_page_url FROM products WHERE product_code = ? AND is_active = 1 LIMIT 1").get(productCode);
       const member = db.prepare(`SELECT members.id, members.member_code
         FROM members
         JOIN users ON users.id = members.user_id
@@ -3316,7 +3322,7 @@ async function router(req, res) {
         ipHash,
         userAgent: req.headers["user-agent"] || ""
       });
-      return redirect(res, `https://tally.so/r/1A5eO4?product=${encodeURIComponent(product.product_code)}&ref=${encodeURIComponent(member.member_code)}`);
+      return redirect(res, productReferralUrl(product.product_page_url, member.member_code));
     }
     const shareMatch = pathname.match(/^\/s\/([A-Za-z0-9_-]+)$/);
     if (shareMatch) {
@@ -3330,7 +3336,9 @@ async function router(req, res) {
           return redirect(res, `/member/register?ref=${encodeURIComponent(link.sharer_code)}`);
         }
         if (link.link_type === "product") {
-          return redirect(res, `https://tally.so/r/1A5eO4?product=${encodeURIComponent(link.product_code)}&ref=${encodeURIComponent(link.sharer_code)}`);
+          const product = db.prepare("SELECT product_page_url FROM products WHERE id = ? AND is_active = 1 LIMIT 1").get(link.product_id);
+          if (!product) throw new Error("Shared product is invalid or inactive.");
+          return redirect(res, productReferralUrl(product.product_page_url, link.sharer_code));
         }
         return redirect(res, `/events/${link.event_id}/register?share=${encodeURIComponent(link.token)}`);
       } catch {

@@ -173,13 +173,25 @@ test("member share center shows only the member's production payout dashboard", 
   const productShareCenter = await fetch(`${baseUrl}/member/share-center?product=PAYOUT001`, { headers: { cookie } });
   assert.equal(productShareCenter.status, 200);
   const productShareHtml = await productShareCenter.text();
-  assert.match(productShareHtml, /商品分享網址（平台網址／商品編號／會員編號）/);
-  const shareMemberCode = productShareHtml.match(/\/share\/PAYOUT001\/(LT[A-Z0-9_-]+)/)?.[1];
+  assert.match(productShareHtml, /商品分享網址（官網商品頁＋會員編號）/);
+  const shareMemberCode = productShareHtml.match(/https:\/\/example\.test\/payout\?ref=(LT[A-Z0-9_-]+)/)?.[1];
   assert.ok(shareMemberCode);
+  assert.doesNotMatch(productShareHtml, /tally\.so/);
 
   const productShare = await fetch(`${baseUrl}/share/PAYOUT001/${shareMemberCode}`, { redirect: "manual" });
   assert.equal(productShare.status, 302);
-  assert.equal(productShare.headers.get("location"), `https://tally.so/r/1A5eO4?product=PAYOUT001&ref=${shareMemberCode}`);
+  assert.equal(productShare.headers.get("location"), `https://example.test/payout?ref=${shareMemberCode}`);
+
+  const verificationDb = new DatabaseSync(databasePath);
+  const legacyProductToken = verificationDb.prepare(`SELECT links.token FROM share_links links
+    JOIN products ON products.id = links.product_id
+    WHERE links.link_type = 'product' AND products.product_code = 'PAYOUT001'
+    ORDER BY links.id DESC LIMIT 1`).get()?.token;
+  verificationDb.close();
+  assert.ok(legacyProductToken);
+  const legacyProductShare = await fetch(`${baseUrl}/s/${legacyProductToken}`, { redirect: "manual" });
+  assert.equal(legacyProductShare.status, 302);
+  assert.equal(legacyProductShare.headers.get("location"), `https://example.test/payout?ref=${shareMemberCode}`);
 
   const invalidProductShare = await fetch(`${baseUrl}/share/UNKNOWN/${shareMemberCode}`);
   assert.equal(invalidProductShare.status, 404);
